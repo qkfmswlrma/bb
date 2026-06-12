@@ -170,6 +170,7 @@ let paused=false;
 let timeLeft=GAME_TIME, freeze=0, freezeText='', freezeSub='';
 let suddenDeath=false, stealCd=0, shakeT=0;
 let flash=0, hitStop=0, ballTrail=[];
+let shotLock=0; // 공격 시작 직후 잠깐 슛/덩크 잠금 (바로 슛 방지)
 let particles=[], floats=[];
 
 function mkPlayer(id){
@@ -292,7 +293,8 @@ function startGame(m){
   setTimeout(()=>SND.whistle(),100);
 }
 function resetPositions(ballTo){
-  P1.x=240; P2.x=W-240;
+  P1.x=330; P2.x=W-330;
+  shotLock=0.8; // 시작 직후 0.8초간 슛 잠금
   for(const p of players){ p.y=GROUND-P_H; p.vx=0;p.vy=0;p.onGround=true; p.hasBall=false; p.charging=false; p.power=0; p.dunking=false; p.squash=0; p.wasAir=false; p.dashTimer=0; p.dashCd=0; p.stunTimer=0; }
   P1.face=1; P2.face=-1;
   ball.held=null; ball.shooter=null; ball.noPickup=0; ball.vx=0; ball.vy=0; ball.dunk=false; ball.cannotScore=false; ballTrail=[];
@@ -304,7 +306,7 @@ function giveBall(p){ ball.held=p; p.hasBall=true; ball.cannotScore=false; }
 
 /* ============ 플레이어 동작 ============ */
 function tryJump(p){ if(p.onGround&&freeze<=0&&p.stunTimer<=0){ p.vy=JUMPV; p.onGround=false; SND.jump(); } }
-function tryCharge(p){ if(p.hasBall&&!p.charging&&!p.dunking&&freeze<=0&&p.stunTimer<=0){ p.charging=true; p.power=0; } }
+function tryCharge(p){ if(p.hasBall&&!p.charging&&!p.dunking&&freeze<=0&&shotLock<=0&&p.stunTimer<=0){ p.charging=true; p.power=0; } }
 
 /* 드리블 스킬: 대시 / 크로스오버 (공 들고 수비수 근처서 발동 시 앵클 브레이크 스턴) */
 function tryDash(p,dir){
@@ -350,6 +352,7 @@ function powerFromV(v){ return Math.max(0,Math.min(100,(v-V_MIN)/(V_MAX-V_MIN)*1
 /* ============ 덩크 ============ */
 function inDunkRange(p){
   if(!p.hasBall||p.onGround||p.dunking)return false;
+  if(shotLock>0)return false; // 시작 직후 잠금 중엔 덩크도 불가
   if(p.vy>3.2)return false; // 빠르게 낙하 중에는 덩크 발동 불가 (정점 근처에서만)
   const h=hoops[p.target];
   const rimCx=(h.rimX1+h.rimX2)/2;
@@ -475,7 +478,7 @@ function updateCPU_for(me,foe,dt){
       else if(contested&&me.onGround&&me.dashCd<=0&&cpuLevel==='hard'&&Math.random()<cfg.dashChance){
         tryDash(me,-(Math.sign(foe.x-me.x)||me.face));return; // 막히면 스텝백
       }
-      else if(cpu.shootDelay<=0&&!me.charging){
+      else if(cpu.shootDelay<=0&&!me.charging&&shotLock<=0){
         me.charging=true;me.power=0;
         const relY=me.y-8;
         const v=speedFor(Math.abs(rimCx-me.x),(RIM_Y-6)-relY);
@@ -575,6 +578,8 @@ function step(dt){
       return;
     }
   }
+
+  shotLock=Math.max(0,shotLock-dt); // 라이브 플레이 중에만 감소
 
   // P1 입력 or CPU
   if(mode==='cpu' && cpuSide===2){
