@@ -187,10 +187,10 @@ const players=[P1,P2];
 const ball={x:W/2,y:200,vx:0,vy:0,held:null,shooter:null,shotFrom:W/2,noPickup:0,spin:0,prevY:200,dunk:false,cannotScore:false};
 
 /* CPU 두뇌 */
-const cpu={think:0, standX:0, planned:false, shootDelay:0, targetPower:0, jumpCd:0, dunkPlan:false};
+const cpu={think:0, standX:0, planned:false, shootDelay:0, targetPower:0, jumpCd:0, dunkPlan:false, mode:null};
 const CPU_CFG={
-  easy:{speed:.8, noise:11, react:.35, delayMin:.6, delayMax:1.5, blockChance:.15, jumpShot:.15, dunkChance:.22},
-  hard:{speed:1.02, noise:3, react:.08, delayMin:.15, delayMax:.55, blockChance:.8, jumpShot:.5, dunkChance:.45}
+  easy:{speed:.84, noise:9, react:.28, delayMin:.45, delayMax:1.1, blockChance:.3, jumpShot:.2, dunkChance:.28, dashChance:.012, contestDist:120, stickGap:48},
+  hard:{speed:1.12, noise:1.4, react:.045, delayMin:.07, delayMax:.26, blockChance:.92, jumpShot:.55, dunkChance:.55, dashChance:.07, contestDist:155, stickGap:30}
 };
 
 /* ============ 화면 전환 ============ */
@@ -243,22 +243,26 @@ function keyPressed(code){
     if(paused){ if(code==='KeyM')goMenu(); return; }
     if(freeze>0)return;
 
-    // 더블탭 감지 (드리블 스킬: 대시 / 크로스오버)
+    // 사람이 어느 선수를 조작하는지: 2P 모드면 둘 다, CPU 모드면 선택한 쪽만
+    const p1Human=(mode==='2p')||cpuSide===1;
+    const p2Human=(mode==='2p')||cpuSide===2;
     const now=performance.now();
-    if(code==='KeyA'||code==='KeyD'){
-      if(P1.lastKey===code && now-P1.lastTap<250){ tryDash(P1, code==='KeyA'?-1:1); }
-      P1.lastKey=code; P1.lastTap=now;
-    }
-    if(mode==='2p' && (code==='ArrowLeft'||code==='ArrowRight')){
-      if(P2.lastKey===code && now-P2.lastTap<250){ tryDash(P2, code==='ArrowLeft'?-1:1); }
-      P2.lastKey=code; P2.lastTap=now;
-    }
 
-    // P1
-    if(code==='KeyW')tryJump(P1);
-    if(code==='KeyS'){ if(!P1.onGround&&inDunkRange(P1))tryDunk(P1); else tryCharge(P1); }
-    // P2 (2P 모드에서만)
-    if(mode==='2p'){
+    // P1 (WASD)
+    if(p1Human){
+      if(code==='KeyA'||code==='KeyD'){
+        if(P1.lastKey===code && now-P1.lastTap<250){ tryDash(P1, code==='KeyA'?-1:1); }
+        P1.lastKey=code; P1.lastTap=now;
+      }
+      if(code==='KeyW')tryJump(P1);
+      if(code==='KeyS'){ if(!P1.onGround&&inDunkRange(P1))tryDunk(P1); else tryCharge(P1); }
+    }
+    // P2 (방향키)
+    if(p2Human){
+      if(code==='ArrowLeft'||code==='ArrowRight'){
+        if(P2.lastKey===code && now-P2.lastTap<250){ tryDash(P2, code==='ArrowLeft'?-1:1); }
+        P2.lastKey=code; P2.lastTap=now;
+      }
       if(code==='ArrowUp')tryJump(P2);
       if(code==='ArrowDown'){ if(!P2.onGround&&inDunkRange(P2))tryDunk(P2); else tryCharge(P2); }
     }
@@ -266,8 +270,10 @@ function keyPressed(code){
 }
 function keyReleased(code){
   if(state!=='playing'||paused)return;
-  if(code==='KeyS')tryShoot(P1);
-  if(mode==='2p'&&code==='ArrowDown')tryShoot(P2);
+  const p1Human=(mode==='2p')||cpuSide===1;
+  const p2Human=(mode==='2p')||cpuSide===2;
+  if(p1Human&&code==='KeyS')tryShoot(P1);
+  if(p2Human&&code==='ArrowDown')tryShoot(P2);
 }
 function togglePause(){
   if(state!=='playing')return;
@@ -413,92 +419,113 @@ function updateCPU_for(me,foe,dt){
   const cfg=CPU_CFG[cpuLevel];
   cpu.think-=dt; cpu.jumpCd-=dt; cpu.shootDelay-=dt;
   let moveDir=0;
+  const myHoop=hoops[me.target];   // 공격 목표 골대
+  const myGoal=hoops[me.defend];   // 수비할 골대
+  const rimCx=(myHoop.rimX1+myHoop.rimX2)/2;
 
-  // 어려움 CPU: 가끔 돌파 크로스오버로 앵클 브레이크
-  if(cpuLevel==='hard' && me.onGround && !me.charging && !me.dunking && me.stunTimer<=0 && me.dashCd<=0){
-    if(me.hasBall && Math.abs(me.x-foe.x)<90 && Math.random()<0.015){
-      tryDash(me, Math.sign(foe.x-me.x)||me.face);
-      return;
-    }
-  }
+  if(me.dunking){me.vx=0;return;}
 
+  // ===================== 공격 (공 소유) =====================
   if(me.hasBall){
-    if(me.dunking){me.vx=0;return;}
-    // 정점 근처(상승 둔화~막 하강)에서만 덩크 실행 → 타이밍 페널티 최소화
-    if(!me.onGround&&me.vy>-1.2&&inDunkRange(me)){tryDunk(me);me.vx=0;return;}
-    const hoop=hoops[me.target];
+    // 덩크: 림 근처 정점에서 실행
+    if(!me.onGround&&me.vy>-1.4&&inDunkRange(me)){tryDunk(me);me.vx=0;return;}
+
+    const distToRim=Math.abs(me.x-rimCx);
+    const defGap=foe.x-me.x;
+    const toRim=Math.sign(rimCx-me.x)||me.face;
+    const defBetween=(Math.sign(defGap)===toRim)&&Math.abs(defGap)<150; // 수비가 림 방향을 막는중
+    const defClose=Math.abs(defGap)<72;
+
+    // 막고 가까우면 크로스오버로 제침 (앵클 브레이크)
+    if(cpuLevel==='hard'&&me.onGround&&me.dashCd<=0&&me.stunTimer<=0&&defBetween&&defClose&&foe.stunTimer<=0&&Math.random()<cfg.dashChance){
+      tryDash(me,toRim);return;
+    }
+
     if(!cpu.planned){
       cpu.planned=true;
-      cpu.dunkPlan=Math.random()<cfg.dunkChance;
-      if(cpu.dunkPlan){
-        cpu.standX=(hoop.rimX1+hoop.rimX2)/2+hoop.dir*42;
-        cpu.shootDelay=cfg.delayMin+Math.random()*.3;
+      const openLane=!defBetween||Math.abs(defGap)>95||foe.stunTimer>0;
+      const r=Math.random();
+      if(openLane&&distToRim>55&&r<cfg.dunkChance){
+        cpu.mode='drive';                        // 림으로 돌진해서 덩크/레이업
+        cpu.standX=rimCx+myHoop.dir*28;
+      } else if(r<cfg.dunkChance+.4&&distToRim<THREE_PT){
+        cpu.mode='jumper';                       // 그 자리서 점퍼
+        cpu.shootDelay=cfg.delayMin+Math.random()*(cfg.delayMax-cfg.delayMin);
       } else {
-        const min= cpuLevel==='hard'?180:150, max= cpuLevel==='hard'?420:340;
-        let d=min+Math.random()*(max-min);
-        if(cpuLevel==='hard'&&Math.random()<.3)d=THREE_PT+15+Math.random()*60; // 가끔 3점 시도
-        cpu.standX=hoop.cx+hoop.dir*d;
-        cpu.standX=Math.max(60,Math.min(W-60,cpu.standX));
+        cpu.mode='three';                        // 3점 라인으로 빠져서 슛
+        cpu.standX=Math.max(60,Math.min(W-60,rimCx+myHoop.dir*(THREE_PT+22+Math.random()*45)));
         cpu.shootDelay=cfg.delayMin+Math.random()*(cfg.delayMax-cfg.delayMin);
       }
     }
-    // 수비수가 너무 붙으면 (hard) 자리 옮김
-    if(cpuLevel==='hard'&&!cpu.dunkPlan&&Math.abs(foe.x-me.x)<50&&Math.random()<.04){
-      cpu.standX=Math.max(60,Math.min(W-60,me.x+(me.x>foe.x?120:-120)));
-    }
-    const dx=cpu.standX-me.x;
-    if(Math.abs(dx)>8)moveDir=Math.sign(dx);
-    else if(cpu.dunkPlan){
-      if(me.onGround&&cpu.shootDelay<=0)tryJump(me);
-      moveDir=Math.sign(dx)||moveDir;
-    }
-    else if(cpu.shootDelay<=0){
-      if(!me.charging){
+
+    if(cpu.mode==='drive'){
+      const dx=cpu.standX-me.x;
+      if(Math.abs(dx)>6)moveDir=Math.sign(dx);
+      // 돌진 중 다시 막히면 크로스오버
+      if(cpuLevel==='hard'&&defClose&&defBetween&&me.onGround&&me.dashCd<=0&&foe.stunTimer<=0&&Math.random()<cfg.dashChance*1.3){
+        tryDash(me,toRim);return;
+      }
+      // 림 도달 → 점프해서 덩크
+      if(Math.abs(me.x-rimCx)<66&&me.onGround)tryJump(me);
+    } else {
+      // jumper / three : 자리 잡고 개방되면 슛
+      const dx=(cpu.mode==='three')?(cpu.standX-me.x):0;
+      const contested=Math.abs(foe.x-me.x)<58&&foe.stunTimer<=0;
+      if(Math.abs(dx)>8)moveDir=Math.sign(dx);
+      else if(contested&&me.onGround&&me.dashCd<=0&&cpuLevel==='hard'&&Math.random()<cfg.dashChance){
+        tryDash(me,-(Math.sign(foe.x-me.x)||me.face));return; // 막히면 스텝백
+      }
+      else if(cpu.shootDelay<=0&&!me.charging){
         me.charging=true;me.power=0;
         const relY=me.y-8;
-        const v=speedFor(Math.abs(hoop.cx-me.x),(RIM_Y-6)-relY);
+        const v=speedFor(Math.abs(rimCx-me.x),(RIM_Y-6)-relY);
         cpu.targetPower=powerFromV(v)+(Math.random()*2-1)*cfg.noise;
         cpu.targetPower=Math.max(8,Math.min(100,cpu.targetPower));
         if(me.onGround&&Math.random()<cfg.jumpShot)tryJump(me);
       }
+      if(me.charging&&me.power>=cpu.targetPower)tryShoot(me);
     }
-    if(me.charging&&me.power>=cpu.targetPower)tryShoot(me);
   }
+  // ===================== 수비 / 루즈볼 =====================
   else {
-    cpu.planned=false;
+    cpu.planned=false; cpu.mode=null;
     if(me.charging){me.charging=false;me.power=0;}
+
     if(foe.hasBall){
-      // 수비: 골대 쪽 길목 차단
-      if(cpu.think<=0){
-        cpu.think=cfg.react;
-        const myGoal=hoops[me.defend];
-        cpu.standX=foe.x+(myGoal.cx-foe.x)*0.18;
-      }
+      // 끈끈한 맨투맨: 공격수와 내 골대 사이를 바짝 차단
+      const goalSide=Math.sign(myGoal.cx-foe.x)||1;
+      cpu.standX=Math.max(40,Math.min(W-40,foe.x+goalSide*cfg.stickGap));
       const dx=cpu.standX-me.x;
-      if(Math.abs(dx)>6)moveDir=Math.sign(dx);
-      // 블록 점프
-      if(foe.charging&&foe.power>45&&Math.abs(foe.x-me.x)<115&&me.onGround&&cpu.jumpCd<=0&&Math.random()<cfg.blockChance){
-        tryJump(me); cpu.jumpCd=.9;
+      if(Math.abs(dx)>3)moveDir=Math.sign(dx);
+
+      // 슛 차징 감지 → 정확한 타이밍에 점프 블록
+      if(foe.charging&&Math.abs(foe.x-me.x)<cfg.contestDist&&me.onGround&&cpu.jumpCd<=0&&Math.random()<cfg.blockChance){
+        tryJump(me); cpu.jumpCd=.6;
+      }
+      // 상대 덩크 시도 → 림 근처 공중이면 같이 점프해서 거부
+      if(!foe.onGround&&inDunkRange(foe)&&Math.abs(me.x-foe.x)<72&&me.onGround&&cpu.jumpCd<=0){
+        tryJump(me); cpu.jumpCd=.45;
       }
     } else {
-      // 공 쟁탈
+      // 루즈볼: 낙하 예측 지점으로 전력 질주 (리바운드 선점)
       if(cpu.think<=0){
-        cpu.think=cfg.react*.6;
+        cpu.think=cfg.react*.5;
         let px=ball.x;
         if(Math.abs(ball.vx)>.5){
           const tAir=Math.max(0,(Math.sqrt(Math.max(0,ball.vy*ball.vy+2*BALL_GRAV*(GROUND-BALL_R-ball.y)))-ball.vy)/BALL_GRAV);
-          px=ball.x+ball.vx*Math.min(tAir,40);
+          px=ball.x+ball.vx*Math.min(tAir,45);
         }
         cpu.standX=Math.max(30,Math.min(W-30,px));
       }
       const dx=cpu.standX-me.x;
-      if(Math.abs(dx)>6)moveDir=Math.sign(dx);
-      if(ball.y<me.y&&Math.abs(ball.x-me.x)<45&&me.onGround&&cpu.jumpCd<=0){tryJump(me);cpu.jumpCd=.7;}
+      if(Math.abs(dx)>4)moveDir=Math.sign(dx);
+      if(ball.y<me.y-8&&Math.abs(ball.x-me.x)<52&&me.onGround&&cpu.jumpCd<=0){tryJump(me);cpu.jumpCd=.55;}
     }
   }
+
   // 이동 적용
   let sp=MOVE*cfg.speed;
-  if(me.hasBall)sp*=.88;
+  if(me.hasBall)sp*=.9;
   if(me.charging)sp*=.45;
   me.vx=moveDir*sp;
   if(moveDir!==0)me.face=moveDir;
