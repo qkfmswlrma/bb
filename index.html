@@ -294,7 +294,7 @@ function startGame(m){
 }
 function resetPositions(ballTo){
   P1.x=330; P2.x=W-330;
-  shotLock=0.2; // 시작 직후 0.8초간 슛 잠금
+  shotLock=0.01; // 시작 직후 0.8초간 슛 잠금
   for(const p of players){ p.y=GROUND-P_H; p.vx=0;p.vy=0;p.onGround=true; p.hasBall=false; p.charging=false; p.power=0; p.dunking=false; p.squash=0; p.wasAir=false; p.dashTimer=0; p.dashCd=0; p.stunTimer=0; }
   P1.face=1; P2.face=-1;
   ball.held=null; ball.shooter=null; ball.noPickup=0; ball.vx=0; ball.vy=0; ball.dunk=false; ball.cannotScore=false; ballTrail=[];
