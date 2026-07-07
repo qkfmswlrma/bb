@@ -1,7 +1,7 @@
 <!DOCTYPE html>
-<html lang="ko">
-<head>
-<meta charset="UTF-8">
+<!-- saved from url=(0014)about:internet -->
+<html lang="ko"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>1 ON 1 BASKETBALL — 농구 대전</title>
 <style>
@@ -64,6 +64,7 @@
     <div class="title">1 ON 1<small>BASKETBALL 농구 대전</small></div>
     <button class="btn" id="btn2p">🏀 1P vs 2P 대전 <span class="key">1</span></button>
     <button class="btn alt" id="btnCpu">🤖 vs 컴퓨터 <span class="key">2</span></button>
+  <button class="btn ghost" id="btnHyper">⚡ 하이퍼모드: OFF <span class="key">3</span></button>
     <div class="help">
       <div><b class="p1c">PLAYER 1</b><br>
         이동 <span class="key">A</span><span class="key">D</span> ·
@@ -74,7 +75,7 @@
         점프 <span class="key">↑</span><br>
         슛(꾹) <span class="key">↓</span></div>
     </div>
-    <div class="hint">2분 안에 10점 선취 · 3점 라인 밖 3점 · 부딪혀 스틸 · 점프 블록 · 방향키 <b>더블탭=대시</b> (공 들고 수비수 옆에서 쓰면 앵클브레이크!) · 림 근처 점프 <b>최고점</b>에서 슛 키 = 🔥덩크!</div>
+    <div class="hint">2분 안에 10점 선취(⚡하이퍼 20점) · 3점 라인 밖 3점 · 부딪혀 스틸 · 점프 블록 · 방향키 <b>더블탭=대시</b> (공 들고 수비수 옆에서 쓰면 앵클브레이크!) · 림 근처 점프 <b>최고점</b>에서 슛 키 = 🔥덩크!<br>⚡ <b>하이퍼모드</b>: 초고속 이동 + <b>더블점프/공중 대시 중 택1</b> + 쓴 뒤 점프 키=<b>급강하</b> + 연속 2골 시 <b>ON FIRE</b> (속도↑ · 덩크 성공률↑)</div>
   </div>
 
   <div id="diff" class="overlay hidden">
@@ -98,8 +99,8 @@
   </div>
 
   <div id="over" class="overlay hidden">
-    <div class="title" id="winText">PLAYER 1 WINS!</div>
-    <div id="finalScore">0 : 0</div>
+    <div class="title" id="winText" style="color: var(--p2);">PLAYER 2 WINS!</div>
+    <div id="finalScore">8 : 10</div>
     <button class="btn" id="btnRematch">🔁 다시하기 <span class="key">R</span></button>
     <button class="btn ghost" id="btnMenu">메뉴로 <span class="key">M</span></button>
   </div>
@@ -116,7 +117,15 @@ const RIM_Y=250, RIM_LEN=46;
 const SHOT_ANGLE=62*Math.PI/180;
 const V_MIN=7, V_MAX=21;
 const THREE_PT=320;
-const WIN_SCORE=10, GAME_TIME=120;
+const GAME_TIME=120;
+
+/* ============ 하이퍼모드 ============ */
+let HYPER=false;
+const HY={move:1.45,jump:1.12,dashCd:.55,dashDur:.22,charge:2.7,dunkX:135,dunkY:115,fireMove:1.12,fireDunk:1.3};
+function mvSp(p){ return MOVE*(HYPER?HY.move:1)*(p&&p.onFire?HY.fireMove:1); }
+function jv(){ return JUMPV*(HYPER?HY.jump:1); }
+function chargeRate(){ return HYPER?HY.charge:1.9; }
+function winScore(){ return HYPER?20:10; }
 
 const cv=document.getElementById('game');
 const ctx=cv.getContext('2d');
@@ -171,11 +180,11 @@ let timeLeft=GAME_TIME, freeze=0, freezeText='', freezeSub='';
 let suddenDeath=false, stealCd=0, shakeT=0;
 let flash=0, hitStop=0, ballTrail=[];
 let shotLock=0; // 공격 시작 직후 잠깐 슛/덩크 잠금 (바로 슛 방지)
-let particles=[], floats=[];
+let particles=[], floats=[], ghosts=[];
 
 function mkPlayer(id){
   return {id, x:0, y:GROUND-P_H, vx:0, vy:0, onGround:true, face:1,
-    hasBall:false, charging:false, power:0, score:0, runPhase:0, jumpCd:0,
+    hasBall:false, charging:false, power:0, score:0, runPhase:0, jumpCd:0, streak:0, onFire:false, airUsed:false, fastFall:false, airDashing:false,
     dunking:false, dunkT:0, dunkTx:0, dunkTy:0, dunkDir:1,
     dunkStartDist:0, dunkStartLowness:0, dunkStartVy:0, squash:0, wasAir:false,
     dashTimer:0, dashCd:0, dashDir:0, stunTimer:0, lastTap:0, lastKey:'',
@@ -185,7 +194,7 @@ function mkPlayer(id){
 const P1=mkPlayer(1), P2=mkPlayer(2);
 const players=[P1,P2];
 
-const ball={x:W/2,y:200,vx:0,vy:0,held:null,shooter:null,shotFrom:W/2,noPickup:0,spin:0,prevY:200,dunk:false,cannotScore:false};
+const ball={x:W/2,y:200,vx:0,vy:0,held:null,shooter:null,shotFrom:W/2,noPickup:0,spin:0,prevY:200,dunk:false,cannotScore:false,fire:false};
 
 /* CPU 두뇌 */
 const cpu={think:0, standX:0, planned:false, shootDelay:0, targetPower:0, jumpCd:0, dunkPlan:false, mode:null};
@@ -201,6 +210,14 @@ function show(name){ for(const k in screens)screens[k].classList.add('hidden'); 
 
 let cpuSide=2; // 1=플레이어가 P1(왼쪽), 2=플레이어가 P2(오른쪽)
 
+function toggleHyper(){
+  HYPER=!HYPER;
+  $('btnHyper').innerHTML=`⚡ 하이퍼모드: ${HYPER?'ON':'OFF'} <span class="key">3</span>`;
+  $('btnHyper').classList.toggle('alt',HYPER);
+  $('btnHyper').classList.toggle('ghost',!HYPER);
+  tone(HYPER?880:440,.1,'square',.14);
+}
+$('btnHyper').onclick=()=>{audio();toggleHyper();};
 $('btn2p').onclick=()=>{audio();startGame('2p');};
 $('btnCpu').onclick=()=>{audio();state='diff';show('diff');};
 $('btnEasy').onclick=()=>{audio();cpuLevel='easy';state='side';show('side');};
@@ -220,6 +237,7 @@ function keyPressed(code){
   if(state==='menu'){
     if(code==='Digit1')startGame('2p');
     if(code==='Digit2'){state='diff';show('diff');}
+    if(code==='Digit3')toggleHyper();
     return;
   }
   if(state==='diff'){
@@ -287,7 +305,8 @@ function startGame(m){
   mode=m; state='playing'; paused=false; show(null);
   buildBg();
   P1.score=0; P2.score=0; timeLeft=GAME_TIME; suddenDeath=false;
-  particles=[]; floats=[]; stealCd=0; flash=0; hitStop=0; ballTrail=[];
+  for(const p of players){ p.streak=0; p.onFire=false; }
+  particles=[]; floats=[]; ghosts=[]; stealCd=0; flash=0; hitStop=0; ballTrail=[]; ball.fire=false;
   resetPositions(null);
   freeze=1.0; freezeText='READY'; freezeSub='';
   setTimeout(()=>SND.whistle(),100);
@@ -295,31 +314,47 @@ function startGame(m){
 function resetPositions(ballTo){
   P1.x=330; P2.x=W-330;
   shotLock=0.01; // 시작 직후 0.8초간 슛 잠금
-  for(const p of players){ p.y=GROUND-P_H; p.vx=0;p.vy=0;p.onGround=true; p.hasBall=false; p.charging=false; p.power=0; p.dunking=false; p.squash=0; p.wasAir=false; p.dashTimer=0; p.dashCd=0; p.stunTimer=0; }
+  for(const p of players){ p.y=GROUND-P_H; p.vx=0;p.vy=0;p.onGround=true; p.hasBall=false; p.charging=false; p.power=0; p.dunking=false; p.squash=0; p.wasAir=false; p.dashTimer=0; p.dashCd=0; p.stunTimer=0; p.airUsed=false; p.fastFall=false; p.airDashing=false; }
   P1.face=1; P2.face=-1;
-  ball.held=null; ball.shooter=null; ball.noPickup=0; ball.vx=0; ball.vy=0; ball.dunk=false; ball.cannotScore=false; ballTrail=[];
+  ball.held=null; ball.shooter=null; ball.noPickup=0; ball.vx=0; ball.vy=0; ball.dunk=false; ball.cannotScore=false; ball.fire=false; ballTrail=[];
   cpu.planned=false; cpu.think=0;
   if(ballTo){ giveBall(ballTo); }
   else { ball.x=W/2; ball.y=GROUND-160; ball.vy=-3; }
 }
-function giveBall(p){ ball.held=p; p.hasBall=true; ball.cannotScore=false; }
+function giveBall(p){ ball.held=p; p.hasBall=true; ball.cannotScore=false; ball.fire=false; }
 
 /* ============ 플레이어 동작 ============ */
-function tryJump(p){ if(p.onGround&&freeze<=0&&p.stunTimer<=0){ p.vy=JUMPV; p.onGround=false; SND.jump(); } }
+function tryJump(p){
+  if(freeze>0||p.stunTimer>0||p.dunking)return;
+  if(p.onGround){
+    p.vy=jv(); p.onGround=false; p.airUsed=false; SND.jump();
+  } else if(HYPER&&!p.airUsed){ // 하이퍼: 공중 행동 택1 — 더블점프
+    p.airUsed=true; p.vy=jv()*.92; p.squash=-.35;
+    spawnDust(p.x,p.y+P_H,7);
+    tone(350,.07,'sine',.1,580);
+  } else if(HYPER&&!p.fastFall){ // 공중 행동 소진 후 점프 키 = 급강하
+    p.fastFall=true; p.vy=Math.max(p.vy,25);
+    p.airDashing=false; p.dashTimer=0;
+    tone(520,.12,'sawtooth',.1,140);
+  }
+}
 function tryCharge(p){ if(p.hasBall&&!p.charging&&!p.dunking&&freeze<=0&&shotLock<=0&&p.stunTimer<=0){ p.charging=true; p.power=0; } }
 
 /* 드리블 스킬: 대시 / 크로스오버 (공 들고 수비수 근처서 발동 시 앵클 브레이크 스턴) */
 function tryDash(p,dir){
-  if(p.dashCd>0||p.dunking||!p.onGround||p.charging||p.stunTimer>0)return;
-  p.dashTimer=.18; p.dashCd=.9; p.dashDir=dir; p.face=dir;
+  if(p.dashCd>0||p.dunking||p.charging||p.stunTimer>0||p.fastFall)return;
+  const air=!p.onGround;
+  if(air&&(!HYPER||p.airUsed))return; // 공중 대시: 하이퍼 전용, 더블점프와 택1
+  p.dashTimer=HYPER?HY.dashDur:.18; p.dashCd=HYPER?HY.dashCd:.9; p.dashDir=dir; p.face=dir;
+  if(air){ p.airUsed=true; p.airDashing=true; p.vy=0; }
   const foe=players.find(q=>q!==p);
-  if(p.hasBall&&foe&&foe.onGround&&Math.abs(p.x-foe.x)<85){
+  if(!air&&p.hasBall&&foe&&foe.onGround&&Math.abs(p.x-foe.x)<(HYPER?150:85)){
     foe.stunTimer=.5; foe.vx=0; foe.squash=.25;
     addFloat(foe.x,foe.y-26,'ANKLE BREAK!','#FFC93C');
     SND.steal(); spawnSparks((p.x+foe.x)/2,GROUND-30,'#FFC93C'); shakeT=.1;
   } else {
-    addFloat(p.x,p.y-26,p.hasBall?'CROSSOVER!':'DRIVE!','#F2EDE4');
-    tone(450,.08,'triangle',.12,250);
+    addFloat(p.x,p.y-26,air?'AIR DASH!':(p.hasBall?'CROSSOVER!':'DRIVE!'),'#F2EDE4');
+    tone(air?560:450,.08,'triangle',.12,air?320:250);
   }
 }
 function tryShoot(p){
@@ -335,7 +370,7 @@ function tryShoot(p){
   ball.x=p.x+dir*10; ball.y=p.y-8;
   ball.vx=Math.cos(SHOT_ANGLE)*v*dir;
   ball.vy=-Math.sin(SHOT_ANGLE)*v;
-  ball.shooter=p; ball.shotFrom=p.x; ball.noPickup=.4; ball.dunk=false;
+  ball.shooter=p; ball.shotFrom=p.x; ball.noPickup=.4; ball.dunk=false; ball.fire=p.onFire;
   p.power=0;
   tone(200+v*18,.09,'sine',.1);
 }
@@ -356,7 +391,9 @@ function inDunkRange(p){
   if(p.vy>3.2)return false; // 빠르게 낙하 중에는 덩크 발동 불가 (정점 근처에서만)
   const h=hoops[p.target];
   const rimCx=(h.rimX1+h.rimX2)/2;
-  return Math.abs(p.x-rimCx)<82&&p.y<RIM_Y+82;
+  const m=p.onFire?HY.fireDunk:1; // ON FIRE: 덩크 범위 1.3배
+  const rx=(HYPER?HY.dunkX:82)*m, ry=(HYPER?HY.dunkY:82)*m;
+  return Math.abs(p.x-rimCx)<rx&&p.y<RIM_Y+ry;
 }
 function tryDunk(p){
   if(!inDunkRange(p))return;
@@ -379,20 +416,13 @@ function slamBall(p){
   const rimCx=(h.rimX1+h.rimX2)/2;
   const foe=players.find(q=>q!==p);
 
-  // 실패 판정
+  // 실패 판정: 확률 없음. 발동 범위 내 시도 = 성공.
+  // 유일한 실패는 수비수가 림 근처에서 같이 점프한 확정 컨테스트(REJECTED).
   let miss=false;
-  // 1) 수비수가 림 근처에서 같이 점프 → 거부
   if(foe&&!foe.onGround&&Math.abs(foe.x-rimCx)<70&&foe.y<RIM_Y+90&&Math.abs(foe.x-p.x)<60){
     miss=true;
     addFloat(rimCx,RIM_Y-26,'REJECTED!','#5ABCFF');
     SND.steal();
-  } else {
-    // 2) 위치 + 타이밍 종합 실패 확률. 정점(vy≈0)·근거리·고지점이면 ~9%, 어긋날수록 급증
-    const dist=p.dunkStartDist||0;
-    const lowness=p.dunkStartLowness||0;
-    const timingPenalty=Math.abs(p.dunkStartVy||0); // 정점에서 멀수록(빨리/늦게 누를수록) 큼
-    const missChance=Math.min(.9,.18+dist*0.006+lowness*0.005+timingPenalty*0.10);
-    if(Math.random()<missChance)miss=true;
   }
 
   p.vy=-3.6;p.vx=0;p.onGround=false;
@@ -469,7 +499,7 @@ function updateCPU_for(me,foe,dt){
         tryDash(me,toRim);return;
       }
       // 림 도달 → 점프해서 덩크
-      if(Math.abs(me.x-rimCx)<66&&me.onGround)tryJump(me);
+      if(Math.abs(me.x-rimCx)<(HYPER?92:66)&&me.onGround)tryJump(me);
     } else {
       // jumper / three : 자리 잡고 개방되면 슛
       const dx=(cpu.mode==='three')?(cpu.standX-me.x):0;
@@ -527,7 +557,7 @@ function updateCPU_for(me,foe,dt){
   }
 
   // 이동 적용
-  let sp=MOVE*cfg.speed;
+  let sp=mvSp(me)*cfg.speed;
   if(me.hasBall)sp*=.9;
   if(me.charging)sp*=.45;
   me.vx=moveDir*sp;
@@ -548,8 +578,11 @@ function step(dt){
   for(const p of players){
     p.dashCd=Math.max(0,p.dashCd-dt);
     p.dashTimer=Math.max(0,p.dashTimer-dt);
+    if(p.airDashing&&p.dashTimer<=0)p.airDashing=false;
     p.stunTimer=Math.max(0,p.stunTimer-dt);
     if(p.dashTimer>0&&Math.random()<0.4)spawnDust(p.x,GROUND-2,2);
+    if(HYPER&&!RM&&(p.dashTimer>0||(p.onFire&&Math.abs(p.vx)>1.5)))ghosts.push({x:p.x,y:p.y,color:p.color,t:.32});
+    if(p.onFire&&!RM&&Math.random()<0.5)spawnFlame(p.x,p.y+22,1);
   }
 
   // 점수/시작 프리즈
@@ -585,17 +618,17 @@ function step(dt){
   if(mode==='cpu' && cpuSide===2){
     // 플레이어가 P2 선택 → P1이 CPU
     if(P1.stunTimer>0){P1.vx=0;}
-    else if(P1.dashTimer>0){P1.vx=P1.dashDir*MOVE*2.3;}
+    else if(P1.dashTimer>0){P1.vx=P1.dashDir*mvSp(P1)*2.3;}
     else updateCPU_for(P1,P2,dt);
   } else {
     if(P1.dunking){P1.vx=0;}
     else if(P1.stunTimer>0){P1.vx=0;}
-    else if(P1.dashTimer>0){P1.vx=P1.dashDir*MOVE*2.3;}
+    else if(P1.dashTimer>0){P1.vx=P1.dashDir*mvSp(P1)*2.3;}
     else {
       let mv=0;
       if(keys['KeyA'])mv-=1;
       if(keys['KeyD'])mv+=1;
-      let sp=MOVE;
+      let sp=mvSp(P1);
       if(P1.hasBall)sp*=.88;
       if(P1.charging)sp*=.45;
       P1.vx=mv*sp;
@@ -606,12 +639,12 @@ function step(dt){
   if(mode==='2p'){
     if(P2.dunking){P2.vx=0;}
     else if(P2.stunTimer>0){P2.vx=0;}
-    else if(P2.dashTimer>0){P2.vx=P2.dashDir*MOVE*2.3;}
+    else if(P2.dashTimer>0){P2.vx=P2.dashDir*mvSp(P2)*2.3;}
     else {
       let mv=0;
       if(keys['ArrowLeft'])mv-=1;
       if(keys['ArrowRight'])mv+=1;
-      let sp=MOVE;
+      let sp=mvSp(P2);
       if(P2.hasBall)sp*=.88;
       if(P2.charging)sp*=.45;
       P2.vx=mv*sp;
@@ -620,18 +653,18 @@ function step(dt){
   } else if(cpuSide===1){
     // 플레이어가 P1 선택 → P2가 CPU (기존 동작)
     if(P2.stunTimer>0){P2.vx=0;}
-    else if(P2.dashTimer>0){P2.vx=P2.dashDir*MOVE*2.3;}
+    else if(P2.dashTimer>0){P2.vx=P2.dashDir*mvSp(P2)*2.3;}
     else updateCPU_for(P2,P1,dt);
   } else {
     // 플레이어가 P2 선택 → P2 키보드 입력
     if(P2.dunking){P2.vx=0;}
     else if(P2.stunTimer>0){P2.vx=0;}
-    else if(P2.dashTimer>0){P2.vx=P2.dashDir*MOVE*2.3;}
+    else if(P2.dashTimer>0){P2.vx=P2.dashDir*mvSp(P2)*2.3;}
     else {
       let mv=0;
       if(keys['ArrowLeft'])mv-=1;
       if(keys['ArrowRight'])mv+=1;
-      let sp=MOVE;
+      let sp=mvSp(P2);
       if(P2.hasBall)sp*=.88;
       if(P2.charging)sp*=.45;
       P2.vx=mv*sp;
@@ -651,12 +684,14 @@ function step(dt){
     p.x+=p.vx;
     p.x=Math.max(P_W/2,Math.min(W-P_W/2,p.x));
     if(!p.onGround){
-      p.vy+=GRAV; p.y+=p.vy;
+      if(p.airDashing&&p.dashTimer>0)p.vy=0; else p.vy+=GRAV;
+      p.y+=p.vy;
       p.wasAir=true;
       if(p.y>=GROUND-P_H){
         p.y=GROUND-P_H;
         const impact=p.vy;
-        p.vy=0;p.onGround=true;
+        p.vy=0;p.onGround=true;p.airUsed=false;p.airDashing=false;
+        if(p.fastFall){ p.fastFall=false; shakeT=Math.max(shakeT,.09); }
         if(p.wasAir&&impact>4){ spawnDust(p.x,GROUND-2,Math.min(12,impact|0)); p.squash=Math.min(.9,impact*.055); if(impact>7)SND.bounce(.28); }
         p.wasAir=false;
       }
@@ -664,7 +699,7 @@ function step(dt){
     // 스쿼시/스트레치
     if(!p.onGround) p.squash=Math.max(-.4,-Math.abs(p.vy)*.02);
     else p.squash*=.74;
-    if(p.charging){ p.power=Math.min(100,p.power+1.9); }
+    if(p.charging){ p.power=Math.min(100,p.power+chargeRate()); }
     p.runPhase+=Math.abs(p.vx)*.32;
   }
 
@@ -692,7 +727,7 @@ function step(dt){
   updateFX(dt);
 
   // 승리 체크
-  if(P1.score>=WIN_SCORE||P2.score>=WIN_SCORE){ if(!pendingEnd){pendingEnd=true; if(freeze<=0)freeze=.01;} }
+  if(P1.score>=winScore()||P2.score>=winScore()){ if(!pendingEnd){pendingEnd=true; if(freeze<=0)freeze=.01;} }
 }
 
 let pendingReset=null, pendingEnd=false;
@@ -721,6 +756,7 @@ function updateBall(dt){
   ball.vy+=BALL_GRAV;
   ball.x+=ball.vx; ball.y+=ball.vy;
   ball.spin+=ball.vx*.05;
+  if(ball.fire&&!RM&&Math.random()<.6)spawnFlame(ball.x,ball.y,1);
 
   // 득점 판정 (덩크 실패 후 cannotScore면 우연히 들어가도 무효)
   for(const side of ['L','R']){
@@ -761,6 +797,7 @@ function updateBall(dt){
     ball.y=GROUND-BALL_R;
     ball.dunk=false;
     ball.cannotScore=false; // 바닥에 닿으면 무효 상태 해제
+    ball.fire=false;
     if(Math.abs(ball.vy)>1.6)SND.bounce(Math.min(1,Math.abs(ball.vy)/12));
     ball.vy*=-.62; ball.vx*=.985;
     if(Math.abs(ball.vy)<1.2)ball.vy=0;
@@ -802,8 +839,11 @@ function onScore(side){
   const conceder=players.find(p=>p.defend===side);
   const dist=Math.abs(ball.shotFrom-h.cx);
   const pts=dist>THREE_PT?3:2;
-  const dunked=ball.dunk; ball.dunk=false;
+  const dunked=ball.dunk; ball.dunk=false; ball.fire=false;
   scorer.score+=pts;
+  scorer.streak++; conceder.streak=0; conceder.onFire=false;
+  let ignited=false;
+  if(HYPER&&!scorer.onFire&&scorer.streak>=2){ scorer.onFire=true; ignited=true; }
   h.net=dunked?1.7:1.1;
   shakeT=dunked?.5:(pts===3?.34:.26);
   spawnConfetti(h.cx,RIM_Y);
@@ -814,10 +854,11 @@ function onScore(side){
   const name=scorer.id===1?'P1':(mode==='cpu'?'CPU':'P2');
   freeze=1.15;
   freezeText=dunked?'SLAM DUNK!':(pts===3?'3 POINTS!':'SWISH!');
-  freezeSub=`${name} +${pts}`;
+  freezeSub=`${name} +${pts}`+(ignited?' · 🔥ON FIRE!':'');
   addFloat(h.cx,RIM_Y-30,'+'+pts,scorer.color);
+  if(ignited){ addFloat(scorer.x,scorer.y-42,'🔥 ON FIRE!','#FF6B2B'); tone(220,.25,'sawtooth',.18,880); }
   ball.held=null;ball.vx=0;ball.vy=8;ball.shooter=null;
-  if(suddenDeath||scorer.score>=WIN_SCORE){ pendingEnd=true; }
+  if(suddenDeath||scorer.score>=winScore()){ pendingEnd=true; }
   else pendingReset={to:conceder};
 }
 
@@ -861,12 +902,22 @@ function spawnDust(x,y,amount){
       vy:-Math.random()*1.5-.3,life:1,color:'#D9CBA8',s:5+Math.random()*7,rot:0,vr:0});
   }
 }
+function spawnFlame(x,y,n){
+  if(RM)return;
+  for(let i=0;i<(n||2);i++){
+    particles.push({type:'flame',x:x+(Math.random()*2-1)*8,y:y+(Math.random()*2-1)*6,
+      vx:(Math.random()*2-1)*.7,vy:-1.2-Math.random()*1.6,life:1,color:'',s:4+Math.random()*5,rot:0,vr:0});
+  }
+}
 function updateFX(dt){
   flash=Math.max(0,flash-dt*2.4);
   for(const f of floats){f.y+=f.vy;f.vy*=.9;f.t-=dt*.85;f.scl+=(1-f.scl)*.3;}
   floats=floats.filter(f=>f.t>0);
+  for(const gh of ghosts)gh.t-=dt*1.9;
+  ghosts=ghosts.filter(g=>g.t>0);
   for(const p of particles){
     if(p.type==='dust'){ p.vy+=.04; p.vx*=.93; p.s+=.5; p.life-=dt*1.6; }
+    else if(p.type==='flame'){ p.vx*=.95; p.vy-=.03; p.s*=.965; p.life-=dt*2.6; }
     else if(p.type==='spark'){ p.vy+=.18; p.vx*=.92; p.vy*=.92; p.life-=dt*2.2; }
     else { p.vy+=.28; p.vx*=.99; p.life-=dt*.8; p.rot+=p.vr; }
     p.x+=p.vx;p.y+=p.vy;
@@ -894,6 +945,13 @@ function draw(){
   ctx.drawImage(bgCanvas,0,0);
 
   drawHoop('L');drawHoop('R');
+  for(const gh of ghosts){
+    ctx.globalAlpha=Math.max(0,gh.t*1.6);
+    ctx.fillStyle=gh.color;
+    roundRect(gh.x-P_W/2,gh.y+14,P_W,P_H-36,9);ctx.fill();
+    ctx.beginPath();ctx.arc(gh.x,gh.y+2,12,0,7);ctx.fill();
+  }
+  ctx.globalAlpha=1;
   drawPlayer(P1);drawPlayer(P2);
   drawBall();
 
@@ -903,6 +961,9 @@ function draw(){
     if(p.type==='dust'){
       ctx.fillStyle=p.color;
       ctx.beginPath();ctx.arc(p.x,p.y,p.s*Math.max(.2,p.life),0,7);ctx.fill();
+    } else if(p.type==='flame'){
+      ctx.fillStyle=p.life>.55?'#FFC93C':'#FF6B2B';
+      ctx.beginPath();ctx.arc(p.x,p.y,p.s*Math.max(.15,p.life),0,7);ctx.fill();
     } else if(p.type==='spark'){
       ctx.strokeStyle=p.color;ctx.lineWidth=2.5;ctx.lineCap='round';
       const len=p.s*2;
@@ -1000,31 +1061,38 @@ function buildBg(){
   g.clearRect(0,0,W,H);
   // 벽
   const wg=g.createLinearGradient(0,0,0,GROUND);
-  wg.addColorStop(0,'#10162B');wg.addColorStop(1,'#1A2240');
+  if(HYPER){ wg.addColorStop(0,'#1C0B33');wg.addColorStop(1,'#341457'); }
+  else { wg.addColorStop(0,'#10162B');wg.addColorStop(1,'#1A2240'); }
   g.fillStyle=wg;g.fillRect(-10,-10,W+20,GROUND+10);
   // 관중석 밴드 + 군중 (정적 베이크)
-  g.fillStyle='#19203A';g.fillRect(0,86,W,62);
+  g.fillStyle=HYPER?'#26103F':'#19203A';g.fillRect(0,86,W,62);
   for(const hd of crowdHeads){
-    g.fillStyle=hd.c>.5?'#222B4C':'#1C2342';
+    g.fillStyle=hd.c>.5?(HYPER?'#3A1C5E':'#222B4C'):(HYPER?'#2E164C':'#1C2342');
     g.beginPath();g.arc(hd.x,hd.y,hd.r,0,7);g.fill();
   }
-  g.fillStyle='#FF6B2B';g.fillRect(0,148,W,5);
+  g.fillStyle=HYPER?'#FF2E88':'#FF6B2B';g.fillRect(0,148,W,5);
   g.fillStyle='rgba(242,237,228,.08)';g.fillRect(0,80,W,4);
   // 배너
   banner(g,120,40,'#E84545', mode==='cpu'&&cpuSide===1?'CPU':'P1');
   banner(g,W-120,40,'#3FA7E0', mode==='cpu'&&cpuSide===2?'CPU':'P2');
+  if(HYPER){
+    g.save();g.globalAlpha=.13;g.fillStyle='#FF2E88';
+    g.font='bold 110px "Arial Black",sans-serif';g.textAlign='center';
+    g.fillText('HYPER',W/2,GROUND-150);
+    g.restore();
+  }
   // 바닥 (쪽모이 마루)
   for(let x=0,i=0;x<W;x+=48,i++){
-    g.fillStyle=i%2?'#C8902A':'#B57E22';
+    g.fillStyle=HYPER?(i%2?'#8A5FC0':'#7A50AE'):(i%2?'#C8902A':'#B57E22');
     g.fillRect(x,GROUND,48,H-GROUND);
     g.fillStyle='rgba(0,0,0,.15)';g.fillRect(x,GROUND,2,H-GROUND);
   }
   g.fillStyle='rgba(0,0,0,.28)';g.fillRect(0,GROUND,W,5);
   // 센터 라인 & 3점 라인
-  g.fillStyle='rgba(242,237,228,.75)';g.fillRect(W/2-2,GROUND,4,H-GROUND);
+  g.fillStyle=HYPER?'rgba(120,235,255,.8)':'rgba(242,237,228,.75)';g.fillRect(W/2-2,GROUND,4,H-GROUND);
   for(const s of ['L','R']){
     const x=hoops[s].cx+hoops[s].dir*THREE_PT;
-    g.fillStyle='#FF6B2B';g.fillRect(x-2,GROUND,4,H-GROUND);
+    g.fillStyle=HYPER?'#FF2E88':'#FF6B2B';g.fillRect(x-2,GROUND,4,H-GROUND);
     g.fillStyle='rgba(242,237,228,.85)';
     g.font='bold 11px ui-monospace,monospace';g.textAlign='center';
     g.fillText('3PT',x,GROUND+34);
@@ -1041,6 +1109,12 @@ function drawPlayer(p){
   ctx.beginPath();ctx.ellipse(x,GROUND-2,20*shScale,5*shScale,0,0,7);ctx.fill();
 
   // 덩크/대시 스피드 라인
+  if(p.fastFall&&!p.onGround&&!RM){
+    ctx.strokeStyle='rgba(242,237,228,.35)';ctx.lineWidth=2;
+    for(let i=-1;i<=1;i++){
+      ctx.beginPath();ctx.moveTo(x+i*10,y-6);ctx.lineTo(x+i*10,y-34);ctx.stroke();
+    }
+  }
   if((p.dunking||p.dashTimer>0)&&!RM){
     ctx.strokeStyle=p.dunking?'rgba(255,201,60,.5)':'rgba(242,237,228,.3)';ctx.lineWidth=2;
     const dDir=p.dunking?p.dunkDir:p.dashDir;
@@ -1132,7 +1206,7 @@ function drawBall(){
   } else if(ballTrail.length){ ballTrail.shift(); }
   for(let i=0;i<ballTrail.length;i++){
     const tp=ballTrail[i], a=(i/ballTrail.length)*.4;
-    ctx.globalAlpha=a; ctx.fillStyle='#FF8A3C';
+    ctx.globalAlpha=a; ctx.fillStyle=ball.fire?'#FFD23C':'#FF8A3C';
     ctx.beginPath();ctx.arc(tp.x,tp.y,BALL_R*(.4+i/ballTrail.length*.6),0,7);ctx.fill();
   }
   ctx.globalAlpha=1;
@@ -1158,6 +1232,9 @@ function drawHUD(){
   ctx.textAlign='center';
   ctx.fillStyle='#FF5A5A';ctx.fillText(String(P1.score).padStart(2,'0'),bx+48,by+39);
   ctx.fillStyle='#5ABCFF';ctx.fillText(String(P2.score).padStart(2,'0'),bx+bw-48,by+39);
+  ctx.font='15px sans-serif';
+  if(P1.onFire)ctx.fillText('🔥',bx+17,by+36);
+  if(P2.onFire)ctx.fillText('🔥',bx+bw-17,by+36);
   // 타이머
   ctx.fillStyle='#FFC93C';
   ctx.font='bold 21px ui-monospace,monospace';
@@ -1168,7 +1245,7 @@ function drawHUD(){
     ctx.fillText(`${m}:${String(s).padStart(2,'0')}`,W/2,by+38);
   }
   ctx.fillStyle='#6B7497';ctx.font='bold 10px "Malgun Gothic",sans-serif';
-  ctx.fillText(mode==='cpu'?`VS CPU · ${cpuLevel==='easy'?'쉬움':'어려움'}`:'1P VS 2P',W/2,by+bh-7);
+  ctx.fillText((HYPER?'⚡HYPER · ':'')+(mode==='cpu'?`VS CPU · ${cpuLevel==='easy'?'쉬움':'어려움'}`:'1P VS 2P'),W/2,by+bh-7);
 
   // 키 힌트
   if(state==='playing'){
@@ -1193,5 +1270,6 @@ function loop(now){
 }
 requestAnimationFrame(loop);
 </script>
-</body>
-</html>
+
+
+</body></html>
