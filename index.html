@@ -52,6 +52,14 @@
   .help b{color:var(--line);font-size:1.05em;letter-spacing:1px}
   .help .p1c{color:var(--p1)} .help .p2c{color:var(--p2)}
   .hint{font-family:'Malgun Gothic',sans-serif;font-weight:400;font-size:13px;color:#8b93b4}
+  .rules{
+    display:grid;grid-template-columns:1fr 1fr;gap:12px 38px;max-width:840px;padding:0 20px;
+    font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;font-weight:400;
+    font-size:clamp(11px,1.5vw,13.5px);line-height:1.9;color:#aab3d0;text-align:left;
+  }
+  .rules h3{color:var(--gold);font-size:1.06em;letter-spacing:1px;margin-bottom:2px}
+  .rules b{color:var(--line)}
+  .rules .p1c{color:var(--p1)} .rules .p2c{color:var(--p2)}
   #winText{font-size:clamp(30px,5.5vw,52px);letter-spacing:2px}
   #finalScore{font-size:clamp(22px,4vw,34px);color:var(--gold);font-family:ui-monospace,'Courier New',monospace}
 </style>
@@ -65,17 +73,38 @@
     <button class="btn" id="btn2p">🏀 1P vs 2P 대전 <span class="key">1</span></button>
     <button class="btn alt" id="btnCpu">🤖 vs 컴퓨터 <span class="key">2</span></button>
   <button class="btn ghost" id="btnHyper">⚡ 하이퍼모드: OFF <span class="key">3</span></button>
-    <div class="help">
-      <div><b class="p1c">PLAYER 1</b><br>
-        이동 <span class="key">A</span><span class="key">D</span> ·
-        점프 <span class="key">W</span><br>
-        슛(꾹) <span class="key">S</span></div>
-      <div><b class="p2c">PLAYER 2</b><br>
-        이동 <span class="key">←</span><span class="key">→</span> ·
-        점프 <span class="key">↑</span><br>
-        슛(꾹) <span class="key">↓</span></div>
+    <button class="btn ghost" id="btnHelp">📖 게임 설명 <span class="key">4</span></button>
+  </div>
+
+  <div id="help" class="overlay hidden" style="gap:12px">
+    <div class="title" style="font-size:clamp(24px,4vw,38px)">게임 설명</div>
+    <div class="rules">
+      <div>
+        <h3>규칙</h3>
+        제한 시간 <b>2분</b> · <b>10점</b> 선취 승리 (하이퍼 <b>20점</b>)<br>
+        동점 종료 시 <b>서든데스</b> · 3점 라인 밖 성공 = <b>3점</b>
+      </div>
+      <div>
+        <h3>조작</h3>
+        <b class="p1c">P1</b> <span class="key">A</span><span class="key">D</span> 이동 · <span class="key">W</span> 점프 · <span class="key">S</span> 슛(꾹)<br>
+        <b class="p2c">P2</b> <span class="key">←</span><span class="key">→</span> 이동 · <span class="key">↑</span> 점프 · <span class="key">↓</span> 슛(꾹)<br>
+        방향키 <b>더블탭 = 대시</b> · <span class="key">ESC</span> 일시정지
+      </div>
+      <div>
+        <h3>기술</h3>
+        <b>스틸</b>: 볼 캐리어에게 몸으로 부딪히기 · <b>블록</b>: 슛 궤도에 점프<br>
+        <b>앵클브레이크</b>: 공 들고 수비수 옆에서 대시<br>
+        <b>덩크</b>: 림 근처 점프 <b>정점</b>에서 슛 키 — 살짝 벗어나면 <b>BRICK</b>, 수비수가 림에서 같이 뛰면 <b>REJECTED</b>
+      </div>
+      <div>
+        <h3>⚡ 하이퍼모드</h3>
+        이동·점프·대시·차지 강화 · <b>20점</b> 선취<br>
+        공중 1회: <b>더블점프</b> 또는 <b>공중 대시</b>(쿨 없음) 택1<br>
+        소진 후 점프 키 = <b>급강하</b><br>
+        연속 2골 = <b>ON FIRE</b>: 이속↑ · 덩크 범위↑ (상대 득점 시 해제)
+      </div>
     </div>
-    <div class="hint">2분 안에 10점 선취(⚡하이퍼 20점) · 3점 라인 밖 3점 · 부딪혀 스틸 · 점프 블록 · 방향키 <b>더블탭=대시</b> (공 들고 수비수 옆에서 쓰면 앵클브레이크!) · 림 근처 점프 <b>최고점</b>에서 슛 키 = 🔥덩크!<br>⚡ <b>하이퍼모드</b>: 초고속 이동 + <b>더블점프/공중 대시 중 택1</b> + 쓴 뒤 점프 키=<b>급강하</b> + 연속 2골 시 <b>ON FIRE</b> (속도↑ · 덩크 성공률↑)</div>
+    <button class="btn ghost" id="btnHelpBack">← 뒤로 <span class="key">ESC</span></button>
   </div>
 
   <div id="diff" class="overlay hidden">
@@ -121,7 +150,9 @@ const GAME_TIME=120;
 
 /* ============ 하이퍼모드 ============ */
 let HYPER=false;
-const HY={move:1.45,jump:1.12,dashCd:.55,dashDur:.22,charge:2.7,dunkX:135,dunkY:115,fireMove:1.12,fireDunk:1.3};
+const HY={move:1.45,jump:1.12,dashCd:.55,dashDur:.22,charge:2.7,fireMove:1.12};
+const DUNK_RANGE={base:{rx:57,ry:38},hyper:{rx:82,ry:33},fire:{rx:104,ry:36}}; // base ry는 점프 정점(279.75) 대비 윈도우 확보용 최소 38
+function dunkRangeFor(p){ return HYPER?(p&&p.onFire?DUNK_RANGE.fire:DUNK_RANGE.hyper):DUNK_RANGE.base; }
 function mvSp(p){ return MOVE*(HYPER?HY.move:1)*(p&&p.onFire?HY.fireMove:1); }
 function jv(){ return JUMPV*(HYPER?HY.jump:1); }
 function chargeRate(){ return HYPER?HY.charge:1.9; }
@@ -184,7 +215,7 @@ let particles=[], floats=[], ghosts=[];
 
 function mkPlayer(id){
   return {id, x:0, y:GROUND-P_H, vx:0, vy:0, onGround:true, face:1,
-    hasBall:false, charging:false, power:0, score:0, runPhase:0, jumpCd:0, streak:0, onFire:false, airUsed:false, fastFall:false, airDashing:false,
+    hasBall:false, charging:false, power:0, score:0, runPhase:0, jumpCd:0, streak:0, onFire:false, airUsed:false, fastFall:false, airDashing:false, dunkForcedMiss:false,
     dunking:false, dunkT:0, dunkTx:0, dunkTy:0, dunkDir:1,
     dunkStartDist:0, dunkStartLowness:0, dunkStartVy:0, squash:0, wasAir:false,
     dashTimer:0, dashCd:0, dashDir:0, stunTimer:0, lastTap:0, lastKey:'',
@@ -205,7 +236,7 @@ const CPU_CFG={
 
 /* ============ 화면 전환 ============ */
 const $=id=>document.getElementById(id);
-const screens={menu:$('menu'),diff:$('diff'),side:$('side'),pause:$('pause'),over:$('over')};
+const screens={menu:$('menu'),diff:$('diff'),side:$('side'),pause:$('pause'),over:$('over'),help:$('help')};
 function show(name){ for(const k in screens)screens[k].classList.add('hidden'); if(name)screens[name].classList.remove('hidden'); }
 
 let cpuSide=2; // 1=플레이어가 P1(왼쪽), 2=플레이어가 P2(오른쪽)
@@ -218,6 +249,8 @@ function toggleHyper(){
   tone(HYPER?880:440,.1,'square',.14);
 }
 $('btnHyper').onclick=()=>{audio();toggleHyper();};
+$('btnHelp').onclick=()=>{audio();state='help';show('help');};
+$('btnHelpBack').onclick=()=>{state='menu';show('menu');};
 $('btn2p').onclick=()=>{audio();startGame('2p');};
 $('btnCpu').onclick=()=>{audio();state='diff';show('diff');};
 $('btnEasy').onclick=()=>{audio();cpuLevel='easy';state='side';show('side');};
@@ -238,6 +271,11 @@ function keyPressed(code){
     if(code==='Digit1')startGame('2p');
     if(code==='Digit2'){state='diff';show('diff');}
     if(code==='Digit3')toggleHyper();
+    if(code==='Digit4'){state='help';show('help');}
+    return;
+  }
+  if(state==='help'){
+    if(code==='Escape'){state='menu';show('menu');}
     return;
   }
   if(state==='diff'){
@@ -342,11 +380,13 @@ function tryCharge(p){ if(p.hasBall&&!p.charging&&!p.dunking&&freeze<=0&&shotLoc
 
 /* 드리블 스킬: 대시 / 크로스오버 (공 들고 수비수 근처서 발동 시 앵클 브레이크 스턴) */
 function tryDash(p,dir){
-  if(p.dashCd>0||p.dunking||p.charging||p.stunTimer>0||p.fastFall)return;
+  if(p.dunking||p.charging||p.stunTimer>0||p.fastFall)return;
   const air=!p.onGround;
-  if(air&&(!HYPER||p.airUsed))return; // 공중 대시: 하이퍼 전용, 더블점프와 택1
-  p.dashTimer=HYPER?HY.dashDur:.18; p.dashCd=HYPER?HY.dashCd:.9; p.dashDir=dir; p.face=dir;
+  if(air&&(!HYPER||p.airUsed))return; // 공중 대시: 하이퍼 전용, 더블점프와 택1 (쿨 없음)
+  if(!air&&p.dashCd>0)return;         // 쿨다운은 지상 대시에만 적용
+  p.dashTimer=HYPER?HY.dashDur:.18; p.dashDir=dir; p.face=dir;
   if(air){ p.airUsed=true; p.airDashing=true; p.vy=0; }
+  else { p.dashCd=HYPER?HY.dashCd:.9; }
   const foe=players.find(q=>q!==p);
   if(!air&&p.hasBall&&foe&&foe.onGround&&Math.abs(p.x-foe.x)<(HYPER?150:85)){
     foe.stunTimer=.5; foe.vx=0; foe.squash=.25;
@@ -385,18 +425,24 @@ function speedFor(dx,dy){
 function powerFromV(v){ return Math.max(0,Math.min(100,(v-V_MIN)/(V_MAX-V_MIN)*100)); }
 
 /* ============ 덩크 ============ */
-function inDunkRange(p){
-  if(!p.hasBall||p.onGround||p.dunking)return false;
-  if(shotLock>0)return false; // 시작 직후 잠금 중엔 덩크도 불가
-  if(p.vy>3.2)return false; // 빠르게 낙하 중에는 덩크 발동 불가 (정점 근처에서만)
+const DUNK_MISS_BAND=30; // 성공 존 아래 30px: 시도는 나가지만 림 맞고 실패
+function dunkZoneState(p){
+  if(!p.hasBall||p.onGround||p.dunking)return 0;
+  if(shotLock>0)return 0; // 시작 직후 잠금 중엔 덩크도 불가
+  if(p.vy>3.2)return 0; // 빠르게 낙하 중에는 덩크 발동 불가 (정점 근처에서만)
   const h=hoops[p.target];
   const rimCx=(h.rimX1+h.rimX2)/2;
-  const m=p.onFire?HY.fireDunk:1; // ON FIRE: 덩크 범위 1.3배
-  const rx=(HYPER?HY.dunkX:82)*m, ry=(HYPER?HY.dunkY:82)*m;
-  return Math.abs(p.x-rimCx)<rx&&p.y<RIM_Y+ry;
+  const dr=dunkRangeFor(p);
+  const dx=Math.abs(p.x-rimCx);
+  if(dx<dr.rx&&p.y<RIM_Y+dr.ry)return 2;
+  if(dx<dr.rx+DUNK_MISS_BAND&&p.y<RIM_Y+dr.ry+DUNK_MISS_BAND)return 1; // 아래·양옆 30px 실패 밴드
+  return 0;
 }
+function inDunkRange(p){ return dunkZoneState(p)>0; }
 function tryDunk(p){
-  if(!inDunkRange(p))return;
+  const zs=dunkZoneState(p);
+  if(zs===0)return;
+  p.dunkForcedMiss=(zs===1);
   const h=hoops[p.target];
   const rimCx=(h.rimX1+h.rimX2)/2;
   // 누른 순간의 상태 기록 — 위치(거리/높이) + 타이밍(수직속도). 정점(vy≈0)에서 누를수록 성공률↑
@@ -418,8 +464,12 @@ function slamBall(p){
 
   // 실패 판정: 확률 없음. 발동 범위 내 시도 = 성공.
   // 유일한 실패는 수비수가 림 근처에서 같이 점프한 확정 컨테스트(REJECTED).
+  const forced=!!p.dunkForcedMiss; p.dunkForcedMiss=false;
   let miss=false;
-  if(foe&&!foe.onGround&&Math.abs(foe.x-rimCx)<70&&foe.y<RIM_Y+90&&Math.abs(foe.x-p.x)<60){
+  if(forced){
+    miss=true;
+    addFloat(rimCx,RIM_Y-26,'BRICK!','#FF6B2B');
+  } else if(foe&&!foe.onGround&&Math.abs(foe.x-rimCx)<70&&foe.y<RIM_Y+90&&Math.abs(foe.x-p.x)<60){
     miss=true;
     addFloat(rimCx,RIM_Y-26,'REJECTED!','#5ABCFF');
     SND.steal();
@@ -435,7 +485,7 @@ function slamBall(p){
     ball.vx=(p.dunkDir||1)*(2+Math.random()*2);ball.vy=-(3+Math.random()*2);
     ball.shooter=p;ball.shotFrom=p.x;ball.noPickup=.35;ball.dunk=false;
     spawnSparks(rimCx,RIM_Y,'#FF6B2B'); hitStop=.05;
-    if(!(foe&&!foe.onGround))addFloat(rimCx,RIM_Y-26,'CLANK!','#FF6B2B');
+    if(!forced&&!(foe&&!foe.onGround))addFloat(rimCx,RIM_Y-26,'CLANK!','#FF6B2B');
     SND.rim();
   } else {
     // 성공: 림 통과 → 득점 판정으로
@@ -461,7 +511,7 @@ function updateCPU_for(me,foe,dt){
   // ===================== 공격 (공 소유) =====================
   if(me.hasBall){
     // 덩크: 림 근처 정점에서 실행
-    if(!me.onGround&&me.vy>-1.4&&inDunkRange(me)){tryDunk(me);me.vx=0;return;}
+    if(!me.onGround&&me.vy>-1.4&&dunkZoneState(me)===2){tryDunk(me);me.vx=0;return;}
 
     const distToRim=Math.abs(me.x-rimCx);
     const defGap=foe.x-me.x;
@@ -752,10 +802,11 @@ function updateBall(dt){
     return;
   }
 
+  const bk=HYPER?1.3:1; // 하이퍼: 공 이동 1.3배속 (수평·수직 동일 배율, 궤적 불변)
   ball.prevY=ball.y;
-  ball.vy+=BALL_GRAV;
-  ball.x+=ball.vx; ball.y+=ball.vy;
-  ball.spin+=ball.vx*.05;
+  ball.vy+=BALL_GRAV*bk;
+  ball.x+=ball.vx*bk; ball.y+=ball.vy*bk;
+  ball.spin+=ball.vx*.05*bk;
   if(ball.fire&&!RM&&Math.random()<.6)spawnFlame(ball.x,ball.y,1);
 
   // 득점 판정 (덩크 실패 후 cannotScore면 우연히 들어가도 무효)
@@ -1247,14 +1298,6 @@ function drawHUD(){
   ctx.fillStyle='#6B7497';ctx.font='bold 10px "Malgun Gothic",sans-serif';
   ctx.fillText((HYPER?'⚡HYPER · ':'')+(mode==='cpu'?`VS CPU · ${cpuLevel==='easy'?'쉬움':'어려움'}`:'1P VS 2P'),W/2,by+bh-7);
 
-  // 키 힌트
-  if(state==='playing'){
-    ctx.font='600 11px "Malgun Gothic",sans-serif';
-    ctx.fillStyle='rgba(242,237,228,.45)';
-    ctx.textAlign='left';ctx.fillText('P1  A·D 이동  W 점프  S 슛',12,H-12);
-    ctx.textAlign='right';
-    ctx.fillText(mode==='2p'?'P2  ←·→ 이동  ↑ 점프  ↓ 슛':'ESC 일시정지',W-12,H-12);
-  }
 }
 
 /* ============ 메인 루프 ============ */
