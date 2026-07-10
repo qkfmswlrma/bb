@@ -1534,29 +1534,52 @@ async function netJoin(){
 }
 function netPC(){
   NET.pc=new RTCPeerConnection(NET_ICE);
+  NET.iceQueue=[]; NET.remoteSet=false;
   NET.pc.onicecandidate=e=>{ if(e.candidate)netSig({type:'ice',cand:e.candidate.toJSON()}); };
   NET.pc.oniceconnectionstatechange=()=>{
-    if(NET.pc.iceConnectionState==='failed'){ netStatus('직결 실패 (NAT)'); netTeardown(); }
+    const st=NET.pc.iceConnectionState;
+    console.log('[NET] ICE:',st);
+    if(st==='checking')netStatus('경로 탐색 중...');
+    else if(st==='connected'||st==='completed')netStatus('경로 확보 · 채널 여는 중...');
+    else if(st==='failed'){ netStatus('직결 실패 (NAT)'); netTeardown(); }
+    else if(st==='disconnected')netStatus('연결 불안정...');
   };
 }
+async function netFlushIce(){
+  NET.remoteSet=true;
+  for(const c of NET.iceQueue){ try{ await NET.pc.addIceCandidate(c); }catch(e){ console.warn('[NET] ICE flush 실패',e); } }
+  NET.iceQueue=[];
+}
 async function netSignal(m){
-  if(m.type==='join'&&NET.role==='host'){
-    netStatus('상대 발견 · 연결 중...');
-    netPC();
-    NET.dc=NET.pc.createDataChannel('game',{ordered:false,maxRetransmits:0});
-    netWire();
-    const o=await NET.pc.createOffer(); await NET.pc.setLocalDescription(o);
-    netSig({type:'offer',sdp:NET.pc.localDescription});
-  } else if(m.type==='offer'&&NET.role==='guest'){
-    netPC();
-    NET.pc.ondatachannel=e=>{ NET.dc=e.channel; netWire(); };
-    await NET.pc.setRemoteDescription(m.sdp);
-    const a=await NET.pc.createAnswer(); await NET.pc.setLocalDescription(a);
-    netSig({type:'answer',sdp:NET.pc.localDescription});
-  } else if(m.type==='answer'&&NET.role==='host'){
-    await NET.pc.setRemoteDescription(m.sdp);
-  } else if(m.type==='ice'&&NET.pc){
-    try{ await NET.pc.addIceCandidate(m.cand); }catch(e){}
+  try{
+    console.log('[NET] 수신:',m.type);
+    if(m.type==='join'&&NET.role==='host'){
+      netStatus('상대 발견 · offer 전송...');
+      netPC();
+      NET.dc=NET.pc.createDataChannel('game',{ordered:false,maxRetransmits:0});
+      netWire();
+      const o=await NET.pc.createOffer(); await NET.pc.setLocalDescription(o);
+      netSig({type:'offer',sdp:NET.pc.localDescription});
+      netStatus('offer 전송됨 · answer 대기...');
+    } else if(m.type==='offer'&&NET.role==='guest'){
+      netStatus('offer 수신 · answer 전송...');
+      netPC();
+      NET.pc.ondatachannel=e=>{ NET.dc=e.channel; netWire(); };
+      await NET.pc.setRemoteDescription(m.sdp);
+      await netFlushIce();
+      const a=await NET.pc.createAnswer(); await NET.pc.setLocalDescription(a);
+      netSig({type:'answer',sdp:NET.pc.localDescription});
+    } else if(m.type==='answer'&&NET.role==='host'){
+      netStatus('answer 수신 · 경로 탐색...');
+      await NET.pc.setRemoteDescription(m.sdp);
+      await netFlushIce();
+    } else if(m.type==='ice'&&NET.pc){
+      if(NET.remoteSet){ try{ await NET.pc.addIceCandidate(m.cand); }catch(e){ console.warn('[NET] ICE 추가 실패',e); } }
+      else NET.iceQueue.push(m.cand); // 원격 SDP 설정 전 도착 → 큐잉
+    }
+  }catch(e){
+    console.error('[NET] 시그널 처리 오류:',e);
+    netStatus('오류: '+e.message);
   }
 }
 function netWire(){
