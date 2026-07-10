@@ -26,6 +26,13 @@
     text-align:center;
   }
   .hidden{display:none}
+  body.hyper{background:#150826}
+  body.hyper .overlay{background:rgba(24,9,44,.86)}
+  body.hyper .title{color:#FF2E88;text-shadow:0 4px 0 rgba(0,0,0,.45),0 0 22px rgba(255,46,136,.4)}
+  body.hyper .title small{color:#CDB6FF}
+  body.hyper .key{background:#2C1650;border-color:#6C4A9E}
+  body.hyper .btn.ghost{box-shadow:inset 0 0 0 2px #CDB6FF;color:#EDE4FF}
+  body.hyper .rules h3{color:#FF2E88}
   .title{
     font-size:clamp(34px,6.5vw,64px);letter-spacing:2px;line-height:1.05;
     color:var(--gold);text-shadow:0 4px 0 rgba(0,0,0,.4);
@@ -69,7 +76,7 @@
   <canvas id="game" width="960" height="540"></canvas>
 
   <div id="menu" class="overlay">
-    <div class="title">1 ON 1<small>BASKETBALL 농구 대전</small></div>
+    <div class="title">1 ON 1<small id="menuSub">BASKETBALL 농구 대전</small></div>
     <button class="btn" id="btn2p">🏀 1P vs 2P 대전 <span class="key">1</span></button>
     <button class="btn alt" id="btnCpu">🤖 vs 컴퓨터 <span class="key">2</span></button>
   <button class="btn ghost" id="btnHyper">⚡ 하이퍼모드: OFF <span class="key">3</span></button>
@@ -228,7 +235,8 @@ const players=[P1,P2];
 const ball={x:W/2,y:200,vx:0,vy:0,held:null,shooter:null,shotFrom:W/2,noPickup:0,spin:0,prevY:200,dunk:false,cannotScore:false,fire:false};
 
 /* CPU 두뇌 */
-const cpu={think:0, standX:0, planned:false, shootDelay:0, targetPower:0, jumpCd:0, dunkPlan:false, mode:null};
+const cpu={think:0, standX:0, planned:false, shootDelay:0, targetPower:0, jumpCd:0, dunkPlan:false, mode:null,
+  combo:null, comboId:null, comboI:0, comboT:0, comboDir:1, comboCd:0, sHeld:false, tapT:0, tapDir:0, lastTapDir:0, lastTapAge:99};
 const CPU_CFG={
   easy:{speed:.84, noise:9, react:.28, delayMin:.45, delayMax:1.1, blockChance:.3, jumpShot:.2, dunkChance:.28, dashChance:.012, contestDist:120, stickGap:48},
   hard:{speed:1.12, noise:1.4, react:.045, delayMin:.07, delayMax:.26, blockChance:.92, jumpShot:.55, dunkChance:.55, dashChance:.07, contestDist:155, stickGap:30}
@@ -246,6 +254,9 @@ function toggleHyper(){
   $('btnHyper').innerHTML=`⚡ 하이퍼모드: ${HYPER?'ON':'OFF'} <span class="key">3</span>`;
   $('btnHyper').classList.toggle('alt',HYPER);
   $('btnHyper').classList.toggle('ghost',!HYPER);
+  document.body.classList.toggle('hyper',HYPER);
+  $('menuSub').textContent=HYPER?'⚡ HYPER MODE ⚡':'BASKETBALL 농구 대전';
+  buildBg(); // 메뉴 뒤 코트 배경도 즉시 테마 전환
   tone(HYPER?880:440,.1,'square',.14);
 }
 $('btnHyper').onclick=()=>{audio();toggleHyper();};
@@ -353,6 +364,7 @@ function resetPositions(ballTo){
   P1.x=330; P2.x=W-330;
   shotLock=0.01; // 시작 직후 0.8초간 슛 잠금
   for(const p of players){ p.y=GROUND-P_H; p.vx=0;p.vy=0;p.onGround=true; p.hasBall=false; p.charging=false; p.power=0; p.dunking=false; p.squash=0; p.wasAir=false; p.dashTimer=0; p.dashCd=0; p.stunTimer=0; p.airUsed=false; p.fastFall=false; p.airDashing=false; }
+  cpu.combo=null; cpu.sHeld=false;
   P1.face=1; P2.face=-1;
   ball.held=null; ball.shooter=null; ball.noPickup=0; ball.vx=0; ball.vy=0; ball.dunk=false; ball.cannotScore=false; ball.fire=false; ballTrail=[];
   cpu.planned=false; cpu.think=0;
@@ -498,6 +510,70 @@ function slamBall(p){
 
 /* ============ CPU AI ============ */
 function updateCPU(dt){ updateCPU_for(P2,P1,dt); }
+/* ============ CPU 콤보 (하이퍼 · 어려움 전용) ============ */
+// 표기: 1문자 = 0.1초. d=림 방향 탭, a=반대 탭, w=점프 키, s=슛 키, 공백=대기
+const CPU_COMBOS={
+  strong:   {seq:'ddwdd'},           // 강한대시: 지상대시→점프→즉시 공중대시
+  high:     {seq:'ddw dd'},          // 높은대시: 공중대시를 반박자 늦게 → 높은 진입
+  backFake: {seq:'waawwdd'},         // 뒷페이크: 후방 공중대시로 낚고 급강하→전방 재돌파
+  frontFake:{seq:'wddwwaa'},         // 앞페이크: 전방으로 낚고 후방 이탈
+  selfPass: {seq:'ws  w', hold:'d'}, // 셀프패스: 전진하며 로브→더블점프 재캐치
+  reverse:  {seq:'aawdd'},           // 리버스: 후퇴 대시로 간격 확보→대시점프→전방 공중대시 역습
+  hopDrive: {seq:'wddw dd'},         // 홉 드라이브: 점프→공중대시→급강하→착지 즉시 지상대시
+  rush:     {seq:'ddwddw'}           // 러시(오프볼): 루즈볼 급습 — 대시점프+공중대시+급강하 선점
+};
+const COMBO_UNIT=.1;
+function startCombo(me,id,toRim){
+  cpu.combo=CPU_COMBOS[id]; cpu.comboId=id; cpu.comboI=0; cpu.comboT=0;
+  cpu.comboHadBall=me.hasBall; // 무볼 시작 콤보(추격 등)는 볼 상실 중단 규칙 미적용
+  cpu.comboDir=toRim; cpu.sHeld=false; cpu.tapT=0; cpu.tapDir=0;
+  cpu.lastTapDir=0; cpu.lastTapAge=99;
+}
+function endCombo(me){
+  if(cpu.sHeld&&me&&me.charging)tryShoot(me);
+  cpu.combo=null; cpu.sHeld=false; cpu.tapT=0;
+}
+function comboVx(me){
+  const hold=cpu.combo&&cpu.combo.hold;
+  let dir=0;
+  if(hold==='d')dir=cpu.comboDir;
+  else if(hold==='a')dir=-cpu.comboDir;
+  else if(cpu.tapT>0)dir=cpu.tapDir;
+  if(!dir)return 0;
+  let sp=mvSp(me);
+  if(me.hasBall)sp*=.88;
+  if(me.charging)sp*=.45;
+  me.face=dir;
+  return dir*sp;
+}
+function stepCombo(me,foe,dt){
+  cpu.comboCd=Math.max(0,cpu.comboCd-dt); // 콤보/대시 중에도 쿨 감소
+  if(!cpu.combo)return;
+  if(me.stunTimer>0||me.dunking){ cpu.combo=null; cpu.sHeld=false; return; }
+  if(cpu.comboId==='rush'){ if(ball.held){ endCombo(me); return; } } // 러시는 누가 잡으면 종료
+  else if(cpu.comboHadBall&&cpu.comboId!=='selfPass'&&!me.hasBall){ endCombo(me); return; } // 볼 소유 시작 콤보만 상실 시 중단
+  cpu.tapT=Math.max(0,cpu.tapT-dt);
+  cpu.lastTapAge+=dt;
+  cpu.comboT-=dt;
+  while(cpu.combo&&cpu.comboT<=0){
+    if(cpu.sHeld){ if(me.charging)tryShoot(me); cpu.sHeld=false; } // s 탭 = 1단위 후 릴리즈
+    const ch=cpu.combo.seq[cpu.comboI++];
+    if(ch===undefined){ endCombo(me); break; }
+    if(ch==='d'||ch==='a'){
+      const dir=(ch==='d'?1:-1)*cpu.comboDir;
+      if(cpu.lastTapDir===dir&&cpu.lastTapAge<.25)tryDash(me,dir); // 더블탭 판정 재현
+      cpu.lastTapDir=dir; cpu.lastTapAge=0;
+      cpu.tapDir=dir; cpu.tapT=COMBO_UNIT;
+    } else if(ch==='w'){
+      tryJump(me); // 상황에 따라 점프/더블점프/급강하로 자동 분기
+    } else if(ch==='s'){
+      if(!me.onGround&&dunkZoneState(me)>0)tryDunk(me);
+      else if(me.hasBall&&!me.charging){ me.charging=true; me.power=0; cpu.sHeld=true; }
+    }
+    cpu.comboT+=COMBO_UNIT;
+  }
+}
+
 function updateCPU_for(me,foe,dt){
   const cfg=CPU_CFG[cpuLevel];
   cpu.think-=dt; cpu.jumpCd-=dt; cpu.shootDelay-=dt;
@@ -518,6 +594,20 @@ function updateCPU_for(me,foe,dt){
     const toRim=Math.sign(rimCx-me.x)||me.face;
     const defBetween=(Math.sign(defGap)===toRim)&&Math.abs(defGap)<150; // 수비가 림 방향을 막는중
     const defClose=Math.abs(defGap)<72;
+
+    // 하이퍼·어려움: 상황별 콤보 발동
+    if(HYPER&&cpuLevel==='hard'&&me.onGround&&me.stunTimer<=0&&cpu.comboCd<=0&&shotLock<=0){
+      let pick=null, cdir=toRim; // 이동 콤보는 방향 자유 — 상황에 따라 역방향 사용
+      if(defBetween&&defClose&&foe.stunTimer<=0){
+        if(Math.random()<5.5*dt){ const r3=Math.random(); pick=r3<.34?'backFake':r3<.68?'frontFake':'reverse'; }
+        else if(Math.random()<1.4*dt)pick='selfPass';
+      } else if(!defBetween&&defClose&&distToRim<150&&foe.stunTimer<=0){
+        // 림 밑 정체 + 등 뒤 밀착 → 이동 콤보를 역방향으로 써서 탈출·리셋
+        if(Math.random()<6.0*dt){ pick=Math.random()<.5?'strong':'hopDrive'; cdir=-toRim; }
+      } else if(distToRim>240){ if(Math.random()<2.6*dt)pick=Math.random()<.6?'strong':'hopDrive'; }
+      else if(distToRim>140){ if(Math.random()<2.4*dt)pick=Math.random()<.7?'high':'reverse'; }
+      if(pick){ startCombo(me,pick,cdir); cpu.comboCd=.8+Math.random()*.5; cpu.planned=false; me.vx=comboVx(me); return; }
+    }
 
     // 막고 가까우면 크로스오버로 제침 (앵클 브레이크)
     if(cpuLevel==='hard'&&me.onGround&&me.dashCd<=0&&me.stunTimer<=0&&defBetween&&defClose&&foe.stunTimer<=0&&Math.random()<cfg.dashChance){
@@ -581,6 +671,15 @@ function updateCPU_for(me,foe,dt){
       const dx=cpu.standX-me.x;
       if(Math.abs(dx)>3)moveDir=Math.sign(dx);
 
+      // 하이퍼·어려움: 역습 추격 — 상대가 내 골대 쪽으로 앞서 있으면 이동 콤보로 따라붙기
+      if(HYPER&&cpuLevel==='hard'&&me.onGround&&me.stunTimer<=0&&cpu.comboCd<=0
+         &&Math.abs(dx)>170
+         &&Math.abs(myGoal.cx-foe.x)<Math.abs(myGoal.cx-me.x)-40
+         &&Math.random()<5.0*dt){
+        startCombo(me,Math.random()<.6?'strong':'hopDrive',Math.sign(dx)||1);
+        cpu.comboCd=.8+Math.random()*.5; me.vx=comboVx(me); return;
+      }
+
       // 슛 차징 감지 → 정확한 타이밍에 점프 블록
       if(foe.charging&&Math.abs(foe.x-me.x)<cfg.contestDist&&me.onGround&&cpu.jumpCd<=0&&Math.random()<cfg.blockChance){
         tryJump(me); cpu.jumpCd=.6;
@@ -599,6 +698,10 @@ function updateCPU_for(me,foe,dt){
           px=ball.x+ball.vx*Math.min(tAir,45);
         }
         cpu.standX=Math.max(30,Math.min(W-30,px));
+      }
+      // 하이퍼·어려움: 먼 루즈볼 급습 콤보
+      if(HYPER&&cpuLevel==='hard'&&me.onGround&&me.stunTimer<=0&&cpu.comboCd<=0&&Math.abs(ball.x-me.x)>150&&Math.random()<2.2*dt){
+        startCombo(me,'rush',Math.sign(ball.x-me.x)||1); cpu.comboCd=.8+Math.random()*.5; me.vx=comboVx(me); return;
       }
       const dx=cpu.standX-me.x;
       if(Math.abs(dx)>4)moveDir=Math.sign(dx);
@@ -667,8 +770,10 @@ function step(dt){
   // P1 입력 or CPU
   if(mode==='cpu' && cpuSide===2){
     // 플레이어가 P2 선택 → P1이 CPU
+    stepCombo(P1,P2,dt);
     if(P1.stunTimer>0){P1.vx=0;}
     else if(P1.dashTimer>0){P1.vx=P1.dashDir*mvSp(P1)*2.3;}
+    else if(cpu.combo&&!P1.dunking){P1.vx=comboVx(P1);}
     else updateCPU_for(P1,P2,dt);
   } else {
     if(P1.dunking){P1.vx=0;}
@@ -702,8 +807,10 @@ function step(dt){
     }
   } else if(cpuSide===1){
     // 플레이어가 P1 선택 → P2가 CPU (기존 동작)
+    stepCombo(P2,P1,dt);
     if(P2.stunTimer>0){P2.vx=0;}
     else if(P2.dashTimer>0){P2.vx=P2.dashDir*mvSp(P2)*2.3;}
+    else if(cpu.combo&&!P2.dunking){P2.vx=comboVx(P2);}
     else updateCPU_for(P2,P1,dt);
   } else {
     // 플레이어가 P2 선택 → P2 키보드 입력
