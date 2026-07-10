@@ -79,8 +79,15 @@
     <div class="title">1 ON 1<small id="menuSub">BASKETBALL 농구 대전</small></div>
     <button class="btn" id="btn2p">🏀 1P vs 2P 대전 <span class="key">1</span></button>
     <button class="btn alt" id="btnCpu">🤖 vs 컴퓨터 <span class="key">2</span></button>
+    <button class="btn alt" id="btnOnline" style="background:#3FA7E0;box-shadow:0 5px 0 #27719C">🌐 온라인 매칭 <span class="key">5</span></button>
   <button class="btn ghost" id="btnHyper">⚡ 하이퍼모드: OFF <span class="key">3</span></button>
     <button class="btn ghost" id="btnHelp">📖 게임 설명 <span class="key">4</span></button>
+  </div>
+
+  <div id="matching" class="overlay hidden">
+    <div class="title" style="font-size:clamp(26px,4.5vw,42px)">🌐 상대 찾는 중<span id="matchDots">...</span></div>
+    <div class="hint" id="matchStatus">플레이어와 연결하고 있어요</div>
+    <button class="btn ghost" id="btnCancelMatch">취소 <span class="key">ESC</span></button>
   </div>
 
   <div id="help" class="overlay hidden" style="gap:12px">
@@ -142,6 +149,7 @@
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script>
 'use strict';
 /* ============ 기본 상수 ============ */
@@ -201,13 +209,25 @@ const SND={
 
 /* ============ 입력 ============ */
 const keys={};
+function isGuestPlaying(){ return mode==='online'&&netMatched&&!amHost; }
 addEventListener('keydown',e=>{
   audio();
   if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'].includes(e.code))e.preventDefault();
+  if(isGuestPlaying()){
+    if(e.code==='Escape'){ if(!e.repeat&&matchChannel)matchChannel.send({type:'broadcast',event:'pause_toggle',payload:{}}); return; }
+    if(state==='playing'&&!paused&&!e.repeat)sendInput(e.code,true);
+    return;
+  }
   if(!e.repeat)keyPressed(e.code);
   keys[e.code]=true;
 });
-addEventListener('keyup',e=>{ keys[e.code]=false; keyReleased(e.code); });
+addEventListener('keyup',e=>{
+  if(isGuestPlaying()){
+    if(state==='playing'&&!paused)sendInput(e.code,false);
+    return;
+  }
+  keys[e.code]=false; keyReleased(e.code);
+});
 
 /* ============ 게임 상태 ============ */
 let state='menu';          // menu | diff | playing | over
@@ -242,9 +262,185 @@ const CPU_CFG={
   hard:{speed:1.12, noise:1.4, react:.045, delayMin:.07, delayMax:.26, blockChance:.92, jumpShot:.55, dunkChance:.55, dashChance:.07, contestDist:155, stickGap:30}
 };
 
+/* ============ 온라인 매칭 (Supabase Realtime) ============ */
+const SUPABASE_URL='https://jbetmfiantxekhfzbrld.supabase.co';
+const SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpiZXRtZmlhbnR4ZWtoZnpicmxkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM2NjI5MjAsImV4cCI6MjA5OTIzODkyMH0.6Dp2lyVzauQ1OzklvMoLOAF092FqpNbC_7OBdk_XSFo';
+let sb=null;
+try{ sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY,{realtime:{params:{eventsPerSecond:30}}}); }catch(e){ console.error('Supabase init failed',e); }
+
+const myId='p_'+Math.random().toString(36).slice(2,10)+Date.now().toString(36).slice(-4);
+let netMatched=false;   // 매칭 완료 & 대전 중
+let amHost=false;
+let lobbyChannel=null, matchChannel=null;
+let remoteKeys={};
+let searching=false;
+let matchDotsT=null;
+let lastSendKeys={};
+let lastSnapSent=0;
+const SNAP_INTERVAL=1000/24; // 초당 24회 상태 전송
+
+function netStatus(msg){ const el=$('matchStatus'); if(el)el.textContent=msg; }
+
+function startOnlineSearch(){
+  if(!sb){ alert('온라인 기능을 초기화하지 못했어요. 네트워크 연결을 확인해줘.'); return; }
+  audio();
+  searching=true; state='matching'; show('matching');
+  netStatus('상대를 찾고 있어요...');
+  if(matchDotsT)clearInterval(matchDotsT);
+  let d=0; matchDotsT=setInterval(()=>{ d=(d+1)%4; const el=$('matchDots'); if(el)el.textContent='.'.repeat(d); },400);
+
+  lobbyChannel=sb.channel('bball-lobby',{config:{presence:{key:myId}}});
+  lobbyChannel.on('presence',{event:'sync'},()=>{
+    if(!searching)return;
+    const state_=lobbyChannel.presenceState();
+    const ids=Object.keys(state_).filter(k=>state_[k]&&state_[k][0]&&state_[k][0].searching).sort();
+    const idx=ids.indexOf(myId);
+    if(idx<0)return;
+    let partner=null;
+    if(idx%2===0)partner=ids[idx+1]; else partner=ids[idx-1];
+    if(partner){ tryConnectTo(partner); }
+  }).subscribe(async(status)=>{
+    if(status==='SUBSCRIBED'){ await lobbyChannel.track({searching:true,ts:Date.now()}); }
+  });
+}
+
+function cancelOnlineSearch(){
+  searching=false; connecting=false; netMatched=false;
+  if(matchDotsT){clearInterval(matchDotsT);matchDotsT=null;}
+  if(lobbyChannel){ sb.removeChannel(lobbyChannel); lobbyChannel=null; }
+  if(matchChannel){ sb.removeChannel(matchChannel); matchChannel=null; }
+  state='menu'; show('menu');
+}
+
+let connecting=false;
+function tryConnectTo(partnerId){
+  if(connecting||netMatched)return;
+  connecting=true;
+  searching=false;
+  if(matchDotsT){clearInterval(matchDotsT);matchDotsT=null;}
+  const pair=[myId,partnerId].sort();
+  const roomId=pair[0]+'__'+pair[1];
+  amHost=(myId===pair[0]);
+  netStatus('상대 발견! 연결 중...');
+
+  if(lobbyChannel){ sb.removeChannel(lobbyChannel); lobbyChannel=null; }
+
+  matchChannel=sb.channel('bball-match-'+roomId);
+  let helloTimer=null, matchedYet=false;
+
+  matchChannel.on('broadcast',{event:'hello'},()=>{
+    matchChannel.send({type:'broadcast',event:'hello-ack',payload:{}});
+    confirmMatch();
+  });
+  matchChannel.on('broadcast',{event:'hello-ack'},()=>{ confirmMatch(); });
+  matchChannel.on('broadcast',{event:'input'},({payload})=>{ if(amHost)handleRemoteInput(payload.code,payload.down); });
+  matchChannel.on('broadcast',{event:'pause_toggle'},()=>{ if(amHost)togglePause(); });
+  matchChannel.on('broadcast',{event:'rematch_req'},()=>{ if(amHost)startGame('online'); });
+  matchChannel.on('broadcast',{event:'bye'},()=>{ opponentLeft(); });
+  matchChannel.on('broadcast',{event:'snapshot'},({payload})=>{ if(!amHost)applySnapshot(payload); });
+
+  function confirmMatch(){
+    if(matchedYet)return; matchedYet=true;
+    connecting=false;
+    if(helloTimer)clearTimeout(helloTimer);
+    netMatched=true;
+    if(amHost){
+      startGame('online');
+    } else {
+      mode='online'; state='playing'; show(null);
+      netStatus('');
+    }
+  }
+
+  matchChannel.subscribe((status)=>{
+    if(status==='SUBSCRIBED'){
+      matchChannel.send({type:'broadcast',event:'hello',payload:{}});
+      helloTimer=setTimeout(()=>{
+        if(!matchedYet){ connecting=false; if(matchChannel){sb.removeChannel(matchChannel);matchChannel=null;} startOnlineSearch(); }
+      },4000);
+    }
+  });
+}
+
+function opponentLeft(){
+  netMatched=false;
+  if(matchChannel){ sb.removeChannel(matchChannel); matchChannel=null; }
+  if(state==='playing'||state==='over'||state==='matching'){
+    alert('상대방이 나갔어요. 메뉴로 돌아갈게요.');
+    goMenu();
+  }
+}
+function leaveOnlineMatch(){
+  if(matchChannel){ matchChannel.send({type:'broadcast',event:'bye',payload:{}}); sb.removeChannel(matchChannel); matchChannel=null; }
+  netMatched=false; amHost=false; remoteKeys={};
+}
+
+/* 게스트 입력 -> 호스트로 전송 */
+function sendInput(code,down){
+  if(!matchChannel)return;
+  matchChannel.send({type:'broadcast',event:'input',payload:{code,down}});
+}
+
+/* 호스트: 게스트의 원격 입력을 P2 액션으로 적용 (기존 p2Human 처리와 동일 로직) */
+function handleRemoteInput(code,down){
+  remoteKeys[code]=down;
+  if(state!=='playing'||paused)return;
+  if(down){
+    if(code==='ArrowLeft'||code==='ArrowRight'){
+      const now=performance.now();
+      if(P2.lastKey===code && now-P2.lastTap<250){ tryDash(P2, code==='ArrowLeft'?-1:1); }
+      P2.lastKey=code; P2.lastTap=now;
+    }
+    if(code==='ArrowUp')tryJump(P2);
+    if(code==='ArrowDown'){ if(!P2.onGround&&inDunkRange(P2))tryDunk(P2); else tryCharge(P2); }
+  } else {
+    if(code==='ArrowDown')tryShoot(P2);
+  }
+}
+
+/* 호스트: 스냅샷 전송 */
+function serializeP(p){
+  return {x:p.x,y:p.y,face:p.face,onGround:p.onGround,hasBall:p.hasBall,charging:p.charging,power:p.power,
+    dunking:p.dunking,dunkDir:p.dunkDir,dunkTx:p.dunkTx,dunkTy:p.dunkTy,squash:p.squash,runPhase:p.runPhase,
+    onFire:p.onFire,fastFall:p.fastFall,dashTimer:p.dashTimer,dashDir:p.dashDir,stunTimer:p.stunTimer,score:p.score,vx:p.vx};
+}
+function maybeBroadcastSnapshot(now){
+  if(!matchChannel||!netMatched)return;
+  if(now-lastSnapSent<SNAP_INTERVAL)return;
+  lastSnapSent=now;
+  matchChannel.send({type:'broadcast',event:'snapshot',payload:{
+    state,paused,
+    P1:serializeP(P1), P2:serializeP(P2),
+    ball:{x:ball.x,y:ball.y,vx:ball.vx,vy:ball.vy,held:ball.held?ball.held.id:null,spin:ball.spin,fire:ball.fire,dunk:ball.dunk},
+    timeLeft,suddenDeath,freeze,freezeText,freezeSub,shakeT,flash,
+    floats:floats.slice(-6),
+    winText: state==='over'?$('winText').textContent:'',
+    winColor: state==='over'?$('winText').style.color:'',
+  }});
+}
+function applySnapshot(s){
+  Object.assign(P1,s.P1); Object.assign(P2,s.P2);
+  ball.x=s.ball.x; ball.y=s.ball.y; ball.vx=s.ball.vx; ball.vy=s.ball.vy; ball.spin=s.ball.spin; ball.fire=s.ball.fire; ball.dunk=s.ball.dunk;
+  ball.held = s.ball.held===1?P1:(s.ball.held===2?P2:null);
+  timeLeft=s.timeLeft; suddenDeath=s.suddenDeath; freeze=s.freeze; freezeText=s.freezeText; freezeSub=s.freezeSub;
+  shakeT=s.shakeT; flash=s.flash; floats=s.floats||[];
+  paused=s.paused;
+  if(s.state!==state){
+    state=s.state;
+    if(state==='playing')show(paused?'pause':null);
+    else if(state==='over'){
+      $('winText').textContent=s.winText; $('winText').style.color=s.winColor;
+      $('finalScore').textContent=`${P1.score} : ${P2.score}`;
+      show('over');
+    }
+  } else if(state==='playing'){
+    show(paused?'pause':null);
+  }
+}
+
 /* ============ 화면 전환 ============ */
 const $=id=>document.getElementById(id);
-const screens={menu:$('menu'),diff:$('diff'),side:$('side'),pause:$('pause'),over:$('over'),help:$('help')};
+const screens={menu:$('menu'),diff:$('diff'),side:$('side'),pause:$('pause'),over:$('over'),help:$('help'),matching:$('matching')};
 function show(name){ for(const k in screens)screens[k].classList.add('hidden'); if(name)screens[name].classList.remove('hidden'); }
 
 let cpuSide=2; // 1=플레이어가 P1(왼쪽), 2=플레이어가 P2(오른쪽)
@@ -264,18 +460,35 @@ $('btnHelp').onclick=()=>{audio();state='help';show('help');};
 $('btnHelpBack').onclick=()=>{state='menu';show('menu');};
 $('btn2p').onclick=()=>{audio();startGame('2p');};
 $('btnCpu').onclick=()=>{audio();state='diff';show('diff');};
+$('btnOnline').onclick=()=>{startOnlineSearch();};
+$('btnCancelMatch').onclick=()=>{cancelOnlineSearch();};
 $('btnEasy').onclick=()=>{audio();cpuLevel='easy';state='side';show('side');};
 $('btnHard').onclick=()=>{audio();cpuLevel='hard';state='side';show('side');};
 $('btnBack').onclick=()=>{state='menu';show('menu');};
 $('btnP1Side').onclick=()=>{audio();cpuSide=1;startGame('cpu');};
 $('btnP2Side').onclick=()=>{audio();cpuSide=2;startGame('cpu');};
 $('btnBackSide').onclick=()=>{state='diff';show('diff');};
-$('btnResume').onclick=()=>togglePause();
+$('btnResume').onclick=()=>{
+  if(isGuestPlaying()){ if(matchChannel)matchChannel.send({type:'broadcast',event:'pause_toggle',payload:{}}); return; }
+  togglePause();
+};
 $('btnQuit').onclick=()=>goMenu();
-$('btnRematch').onclick=()=>{audio();startGame(mode);};
+$('btnRematch').onclick=()=>{
+  audio();
+  if(mode==='online'&&netMatched){
+    if(amHost)startGame('online');
+    else if(matchChannel)matchChannel.send({type:'broadcast',event:'rematch_req',payload:{}});
+    return;
+  }
+  startGame(mode);
+};
 $('btnMenu').onclick=()=>goMenu();
 
-function goMenu(){ state='menu'; paused=false; show('menu'); }
+function goMenu(){
+  if(netMatched||connecting){ leaveOnlineMatch(); }
+  if(searching){ cancelOnlineSearch(); return; }
+  state='menu'; paused=false; show('menu');
+}
 
 function keyPressed(code){
   if(state==='menu'){
@@ -283,6 +496,11 @@ function keyPressed(code){
     if(code==='Digit2'){state='diff';show('diff');}
     if(code==='Digit3')toggleHyper();
     if(code==='Digit4'){state='help';show('help');}
+    if(code==='Digit5')startOnlineSearch();
+    return;
+  }
+  if(state==='matching'){
+    if(code==='Escape')cancelOnlineSearch();
     return;
   }
   if(state==='help'){
@@ -311,9 +529,9 @@ function keyPressed(code){
     if(paused){ if(code==='KeyM')goMenu(); return; }
     if(freeze>0)return;
 
-    // 사람이 어느 선수를 조작하는지: 2P 모드면 둘 다, CPU 모드면 선택한 쪽만
-    const p1Human=(mode==='2p')||cpuSide===1;
-    const p2Human=(mode==='2p')||cpuSide===2;
+    // 사람이 어느 선수를 조작하는지: 2P 모드면 둘 다, CPU 모드면 선택한 쪽만, 온라인이면 호스트=P1만 로컬 처리(P2는 원격 입력으로 처리)
+    const p1Human = mode==='2p' ? true : mode==='online' ? amHost : cpuSide===1;
+    const p2Human = mode==='2p' ? true : mode==='online' ? false : cpuSide===2;
     const now=performance.now();
 
     // P1 (WASD)
@@ -338,8 +556,8 @@ function keyPressed(code){
 }
 function keyReleased(code){
   if(state!=='playing'||paused)return;
-  const p1Human=(mode==='2p')||cpuSide===1;
-  const p2Human=(mode==='2p')||cpuSide===2;
+  const p1Human = mode==='2p' ? true : mode==='online' ? amHost : cpuSide===1;
+  const p2Human = mode==='2p' ? true : mode==='online' ? false : cpuSide===2;
   if(p1Human&&code==='KeyS')tryShoot(P1);
   if(p2Human&&code==='ArrowDown')tryShoot(P2);
 }
@@ -517,20 +735,50 @@ const CPU_COMBOS={
   high:     {seq:'ddw dd'},          // 높은대시: 공중대시를 반박자 늦게 → 높은 진입
   backFake: {seq:'waawwdd'},         // 뒷페이크: 후방 공중대시로 낚고 급강하→전방 재돌파
   frontFake:{seq:'wddwwaa'},         // 앞페이크: 전방으로 낚고 후방 이탈
-  selfPass: {seq:'ws  w', hold:'d'}, // 셀프패스: 전진하며 로브→더블점프 재캐치
+  selfPass: {seq:'  ws    w         ', hold:'d'}, // 셀프패스: d유지 질주 → 로브 → 0.4초 뒤 재점프, 착지까지 d 유지
   reverse:  {seq:'aawdd'},           // 리버스: 후퇴 대시로 간격 확보→대시점프→전방 공중대시 역습
   hopDrive: {seq:'wddw dd'},         // 홉 드라이브: 점프→공중대시→급강하→착지 즉시 지상대시
-  rush:     {seq:'ddwddw'}           // 러시(오프볼): 루즈볼 급습 — 대시점프+공중대시+급강하 선점
+  rush:     {seq:'ddwddw'},          // 러시(오프볼): 루즈볼 급습 — 대시점프+공중대시+급강하 선점
+  alleyOop: {seq:'  ws    wDDDDD', hold:'d'}, // 알리웁: 로브→더블점프 재캐치→D 연타로 캐치 즉시 덩크
+  slamRise: {seq:'wddw   w', hold:'d'},    // 슬램라이즈: 공중대시 진입→급강하 스터터→자원 리셋 재점프
+  giveGo:   {seq:'sss dd           ', hold:'d'} // 기브앤고: 0.3초 차지 로브→대시 관통→재캐치까지 d 유지(1.7초)
 };
 const COMBO_UNIT=.1;
+
+/* ===== 부분동작(파편) & 실시간 조합기 =====
+   실측 전진 변위(하이퍼, 종료+착지 기준): dd 130 · wdd 407 · ddw 492 · ddwdd 554
+   슬램 낚시: wddw +143(전방 정지) · waaw -129(후방)  — 연접 시 관성 이월로 비선형 */
+const FRAG={dashF:'dd',dashB:'aa',hopF:'ddw',hopB:'aaw',airF:'wdd',airB:'waa',slamF:'wddw',slamB:'waaw'};
+const BRIDGES=[[554,'ddwdd'],[492,'ddw'],[407,'wdd'],[130,'dd']];
+function pickBridge(d){ for(const b of BRIDGES){ if(d>=b[0]*.75)return b[1]; } return FRAG.dashF; }
+function composeAttack(dist,pressed){
+  let seq;
+  if(pressed){ // 낚시 조각 + 후속 조각
+    const r=Math.random();
+    if(r<.40)      seq=FRAG.slamB+(Math.random()<.5?FRAG.airF:FRAG.hopF); // 뒤낚시→전진 돌파
+    else if(r<.75) seq=FRAG.slamF+(Math.random()<.5?FRAG.airB:FRAG.hopB); // 앞낚시→후방 이탈
+    else           seq=FRAG.dashB+FRAG.airF;                              // 간격 확보→돌파
+  } else {
+    seq=pickBridge(dist-90); // 존 진입 여유분 제외한 거리 예산
+    if(Math.random()<.35)seq+='DD'; // 진입 직후 덩크 안전탭
+  }
+  return {seq:seq, id:'조합:'+seq};
+}
+function composeChase(dist){
+  const seq=dist>430?FRAG.hopF+FRAG.hopF:FRAG.hopF; // ddw 반복
+  return {seq:seq, id:'조합:'+seq};
+}
 function startCombo(me,id,toRim){
-  cpu.combo=CPU_COMBOS[id]; cpu.comboId=id; cpu.comboI=0; cpu.comboT=0;
+  if(typeof id==='string'){ cpu.combo=CPU_COMBOS[id]; cpu.comboId=id; }
+  else { cpu.combo=id; cpu.comboId=id.id||'composed'; } // 즉석 조합 시퀀스 허용
+  cpu.comboI=0; cpu.comboT=0;
   cpu.comboHadBall=me.hasBall; // 무볼 시작 콤보(추격 등)는 볼 상실 중단 규칙 미적용
+  cpu.selfThrew=false; // 콤보 중 스스로 던진 공은 상실로 취급하지 않음
   cpu.comboDir=toRim; cpu.sHeld=false; cpu.tapT=0; cpu.tapDir=0;
   cpu.lastTapDir=0; cpu.lastTapAge=99;
 }
 function endCombo(me){
-  if(cpu.sHeld&&me&&me.charging)tryShoot(me);
+  if(cpu.sHeld&&me&&me.charging){tryShoot(me);cpu.selfThrew=true;}
   cpu.combo=null; cpu.sHeld=false; cpu.tapT=0;
 }
 function comboVx(me){
@@ -551,13 +799,13 @@ function stepCombo(me,foe,dt){
   if(!cpu.combo)return;
   if(me.stunTimer>0||me.dunking){ cpu.combo=null; cpu.sHeld=false; return; }
   if(cpu.comboId==='rush'){ if(ball.held){ endCombo(me); return; } } // 러시는 누가 잡으면 종료
-  else if(cpu.comboHadBall&&cpu.comboId!=='selfPass'&&!me.hasBall){ endCombo(me); return; } // 볼 소유 시작 콤보만 상실 시 중단
+  else if(cpu.comboHadBall&&!cpu.selfThrew&&!me.hasBall){ endCombo(me); return; } // 스틸 등 실제 상실만 중단 (자기 로브는 계속)
   cpu.tapT=Math.max(0,cpu.tapT-dt);
   cpu.lastTapAge+=dt;
   cpu.comboT-=dt;
   while(cpu.combo&&cpu.comboT<=0){
-    if(cpu.sHeld){ if(me.charging)tryShoot(me); cpu.sHeld=false; } // s 탭 = 1단위 후 릴리즈
     const ch=cpu.combo.seq[cpu.comboI++];
+    if(cpu.sHeld&&ch!=='s'){ if(me.charging){tryShoot(me);cpu.selfThrew=true;} cpu.sHeld=false; } // s가 끊기는 순간 릴리즈 (s 연속 = 차지 유지)
     if(ch===undefined){ endCombo(me); break; }
     if(ch==='d'||ch==='a'){
       const dir=(ch==='d'?1:-1)*cpu.comboDir;
@@ -569,6 +817,8 @@ function stepCombo(me,foe,dt){
     } else if(ch==='s'){
       if(!me.onGround&&dunkZoneState(me)>0)tryDunk(me);
       else if(me.hasBall&&!me.charging){ me.charging=true; me.power=0; cpu.sHeld=true; }
+    } else if(ch==='D'){ // 덩크 전용: 존+공 조건 충족 시에만 발동, 차지로 새지 않음
+      if(me.hasBall&&!me.onGround&&dunkZoneState(me)>0)tryDunk(me);
     }
     cpu.comboT+=COMBO_UNIT;
   }
@@ -597,16 +847,24 @@ function updateCPU_for(me,foe,dt){
 
     // 하이퍼·어려움: 상황별 콤보 발동
     if(HYPER&&cpuLevel==='hard'&&me.onGround&&me.stunTimer<=0&&cpu.comboCd<=0&&shotLock<=0){
-      let pick=null, cdir=toRim; // 이동 콤보는 방향 자유 — 상황에 따라 역방향 사용
+      const fire=(c,d)=>{ startCombo(me,c,d===undefined?toRim:d); cpu.comboCd=.8+Math.random()*.5; cpu.planned=false; me.vx=comboVx(me); };
       if(defBetween&&defClose&&foe.stunTimer<=0){
-        if(Math.random()<5.5*dt){ const r3=Math.random(); pick=r3<.34?'backFake':r3<.68?'frontFake':'reverse'; }
-        else if(Math.random()<1.4*dt)pick='selfPass';
+        if(Math.random()<5.5*dt){ fire(composeAttack(distToRim,true)); return; }        // 압박: 낚시 조각 조합
+        else if(Math.random()<1.6*dt){ fire(Math.random()<.5?'selfPass':'giveGo'); return; } // 로브 계열은 아톰 유지
       } else if(!defBetween&&defClose&&distToRim<150&&foe.stunTimer<=0){
-        // 림 밑 정체 + 등 뒤 밀착 → 이동 콤보를 역방향으로 써서 탈출·리셋
-        if(Math.random()<6.0*dt){ pick=Math.random()<.5?'strong':'hopDrive'; cdir=-toRim; }
-      } else if(distToRim>240){ if(Math.random()<2.6*dt)pick=Math.random()<.6?'strong':'hopDrive'; }
-      else if(distToRim>140){ if(Math.random()<2.4*dt)pick=Math.random()<.7?'high':'reverse'; }
-      if(pick){ startCombo(me,pick,cdir); cpu.comboCd=.8+Math.random()*.5; cpu.planned=false; me.vx=comboVx(me); return; }
+        if(Math.random()<6.0*dt){ fire(composeAttack(260,false),-toRim); return; }      // 등 뒤 밀착: 역방향 탈출 조합
+      } else if(distToRim>240){
+        if(Math.random()<2.6*dt){
+          if(distToRim<410&&Math.random()<.35){ fire('alleyOop'); return; }             // 알리웁 창
+          fire(composeAttack(distToRim,false)); return;                                 // 거리 예산 브리지
+        }
+      }
+      else if(distToRim>140){
+        if(Math.random()<2.4*dt){
+          if(Math.random()<.35){ fire('slamRise'); return; }
+          fire(composeAttack(distToRim,false)); return;
+        }
+      }
     }
 
     // 막고 가까우면 크로스오버로 제침 (앵클 브레이크)
@@ -676,7 +934,7 @@ function updateCPU_for(me,foe,dt){
          &&Math.abs(dx)>170
          &&Math.abs(myGoal.cx-foe.x)<Math.abs(myGoal.cx-me.x)-40
          &&Math.random()<5.0*dt){
-        startCombo(me,Math.random()<.6?'strong':'hopDrive',Math.sign(dx)||1);
+        startCombo(me,composeChase(Math.abs(dx)),Math.sign(dx)||1);
         cpu.comboCd=.8+Math.random()*.5; me.vx=comboVx(me); return;
       }
 
@@ -701,7 +959,7 @@ function updateCPU_for(me,foe,dt){
       }
       // 하이퍼·어려움: 먼 루즈볼 급습 콤보
       if(HYPER&&cpuLevel==='hard'&&me.onGround&&me.stunTimer<=0&&cpu.comboCd<=0&&Math.abs(ball.x-me.x)>150&&Math.random()<2.2*dt){
-        startCombo(me,'rush',Math.sign(ball.x-me.x)||1); cpu.comboCd=.8+Math.random()*.5; me.vx=comboVx(me); return;
+        startCombo(me,composeChase(Math.abs(ball.x-me.x)),Math.sign(ball.x-me.x)||1); cpu.comboCd=.8+Math.random()*.5; me.vx=comboVx(me); return;
       }
       const dx=cpu.standX-me.x;
       if(Math.abs(dx)>4)moveDir=Math.sign(dx);
@@ -799,6 +1057,20 @@ function step(dt){
       let mv=0;
       if(keys['ArrowLeft'])mv-=1;
       if(keys['ArrowRight'])mv+=1;
+      let sp=mvSp(P2);
+      if(P2.hasBall)sp*=.88;
+      if(P2.charging)sp*=.45;
+      P2.vx=mv*sp;
+      if(mv!==0)P2.face=mv;
+    }
+  } else if(mode==='online'){
+    if(P2.dunking){P2.vx=0;}
+    else if(P2.stunTimer>0){P2.vx=0;}
+    else if(P2.dashTimer>0){P2.vx=P2.dashDir*mvSp(P2)*2.3;}
+    else {
+      let mv=0;
+      if(remoteKeys['ArrowLeft'])mv-=1;
+      if(remoteKeys['ArrowRight'])mv+=1;
       let sp=mvSp(P2);
       if(P2.hasBall)sp*=.88;
       if(P2.charging)sp*=.45;
@@ -1403,7 +1675,7 @@ function drawHUD(){
     ctx.fillText(`${m}:${String(s).padStart(2,'0')}`,W/2,by+38);
   }
   ctx.fillStyle='#6B7497';ctx.font='bold 10px "Malgun Gothic",sans-serif';
-  ctx.fillText((HYPER?'⚡HYPER · ':'')+(mode==='cpu'?`VS CPU · ${cpuLevel==='easy'?'쉬움':'어려움'}`:'1P VS 2P'),W/2,by+bh-7);
+  ctx.fillText((HYPER?'⚡HYPER · ':'')+(mode==='cpu'?`VS CPU · ${cpuLevel==='easy'?'쉬움':'어려움'}`:mode==='online'?'🌐 온라인 대전':'1P VS 2P'),W/2,by+bh-7);
 
 }
 
@@ -1413,9 +1685,14 @@ const STEP=1000/60;
 function loop(now){
   let dt=now-last;last=now;
   if(dt>60)dt=60;
-  acc+=dt;
-  while(acc>=STEP){ step(STEP/1000); acc-=STEP; }
-  draw();
+  if(isGuestPlaying()){
+    draw();
+  } else {
+    acc+=dt;
+    while(acc>=STEP){ step(STEP/1000); acc-=STEP; }
+    draw();
+    if(mode==='online'&&netMatched&&amHost)maybeBroadcastSnapshot(now);
+  }
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
