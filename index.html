@@ -1575,7 +1575,7 @@ function rbReset(seed){
   RB.on=true; RB.myIdx=(NET.role==='host')?0:1; RB.frame=0;
   RB.inp.fill(null); RB.ok.fill(null); RB.pred.fill(0); RB.snap.fill(null);
   RB.remoteConf=-1; RB.remoteLastBits=0; RB.peerFrame=0;
-  RB.rbFrom=null; RB.rollbacks=0; RB.stalls=0; RB.hashes={}; RB.lastHashF=-1; RB.vis=null;
+  RB.rbFrom=null; RB.rollbacks=0; RB.stalls=0; RB.hashes={}; RB.lastHashF=-1; RB.vis=null; RB.peerLag=0;
   NET.seed=seed;
 }
 function rbLocalBits(){
@@ -1611,6 +1611,7 @@ function rbAdvanceConf(){
 function rbOnRemote(msg){ // {t:'i', f, a:[6개 비트], pf:상대 프레임}
   const rIdx=1-RB.myIdx;
   RB.peerFrame=Math.max(RB.peerFrame,msg.pf|0);
+  if(msg.lg!==undefined)RB.peerLag=msg.lg|0;
   for(let k=0;k<msg.a.length;k++){
     const f=msg.f-(msg.a.length-1)+k, bits=msg.a[k];
     if(f<0)continue;
@@ -1661,13 +1662,15 @@ function rbSendInputs(f){
   if(!NET.dc||NET.dc.readyState!=='open')return;
   const arr=[]; for(let k=5;k>=0;k--){ const ff=f-k, i=ff&255;
     arr.push((ff>=0&&RB.inp[i]&&RB.inp[i].f===ff)?RB.inp[i].b[RB.myIdx]:0); }
-  NET.dc.send(JSON.stringify({t:'i',f,a:arr,pf:RB.frame}));
+  NET.dc.send(JSON.stringify({t:'i',f,a:arr,pf:RB.frame,lg:RB.frame-RB.remoteConf}));
 }
 function rbAdvance(){
   if(RB.rbFrom!==null&&RB.rbFrom<=RB.frame)rbDoRollback();
-  // 양보(스톨·페이싱) 통합: 어떤 이유로 멈추든 하트비트는 계속 흘려 상호 교착 방지
-  const stallGap=RB.frame-RB.remoteConf>12;      // 확정 지연 → 스냅 링 보호
-  const paceGap =RB.frame-RB.peerFrame>6;        // 상대보다 과도하게 앞섬
+  // 양보(스톨·지연균형) 통합: 어떤 이유로 멈추든 하트비트는 계속 흘려 상호 교착 방지
+  const myLag=RB.frame-RB.remoteConf;
+  const stallGap=myLag>12;                              // 확정 지연 → 스냅 링 보호
+  const paceGap =(myLag>RB.peerLag+1&&(RB.frame&3)===0) // 지연 균형: 리더가 주기적으로 양보
+               ||RB.frame-RB.peerFrame>10;              // 백스톱
   if(stallGap||paceGap){
     RB.stalls++;
     if(RB.stalls%4===1){
