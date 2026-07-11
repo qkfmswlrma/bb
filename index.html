@@ -158,9 +158,13 @@ const MOVE=4.2, JUMPV=-11.5;
 const P_W=34, P_H=66, BALL_R=11;
 const RIM_Y=250, RIM_LEN=46;
 const SHOT_ANGLE=62*Math.PI/180;
+const SHOT_COS=0.46947156278589086, SHOT_SIN=0.882947592858927, SHOT_TAN=1.8807264653463318; // 62° 사전계산 (엔진 간 결정론)
 const V_MIN=7, V_MAX=21;
 const THREE_PT=320;
 const GAME_TIME=120;
+/* 결정론 PRNG (mulberry32) — 롤백용. 게임플레이 난수는 rnd()만 사용 */
+let rngState=12345;
+function rnd(){ rngState=rngState+0x6D2B79F5|0; let t=Math.imul(rngState^rngState>>>15,1|rngState); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }
 
 /* ============ 하이퍼모드 ============ */
 let HYPER=false;
@@ -186,6 +190,7 @@ const hoops={
 let AC=null;
 function audio(){ if(!AC){ try{AC=new (window.AudioContext||window.webkitAudioContext)();}catch(e){} } if(AC&&AC.state==='suspended')AC.resume(); }
 function tone(f,d,type,vol,slide){
+  if(RESIM)return;
   if(!AC)return;
   const o=AC.createOscillator(),g=AC.createGain(),t=AC.currentTime;
   o.type=type||'sine'; o.frequency.setValueAtTime(f,t);
@@ -221,11 +226,13 @@ addEventListener('keydown',e=>{
   if(NET.playing&&NET.role==='host'&&e.code.startsWith('Arrow'))return; // 화살표는 원격 P2 전용
   if(!e.repeat)keyPressed(e.code);
   keys[e.code]=true;
+  setHeld(e.code,true);
 });
 addEventListener('keyup',e=>{
   if(NET.playing&&NET.role==='guest'){ netGuestKey(e.code,false); return; }
   if(NET.playing&&NET.role==='host'&&e.code.startsWith('Arrow'))return;
   keys[e.code]=false; keyReleased(e.code);
+  setHeld(e.code,false);
 });
 
 /* ============ 게임 상태 ============ */
@@ -238,11 +245,40 @@ let suddenDeath=false, stealCd=0, shakeT=0;
 let flash=0, hitStop=0, ballTrail=[];
 let shotLock=0; // 공격 시작 직후 잠깐 슛/덩크 잠금 (바로 슛 방지)
 let particles=[], floats=[], ghosts=[];
+/* 프레임 샘플 입력 (롤백 결정론): 비트 L=1 R=2 J=4 S=8 */
+const BIT_L=1,BIT_R=2,BIT_J=4,BIT_S=8;
+let heldP1=0, heldP2=0;          // 키 이벤트가 갱신 (로컬 라이브)
+let inpP1=0, inpP2=0;            // 이번 프레임 시뮬 입력
+let prevInpP1=0, prevInpP2=0;    // 에지 검출용 (롤백 상태에 포함)
+let frameNo=0;                   // 시뮬 프레임 카운터 (롤백 상태에 포함)
+let RESIM=false;                 // 재시뮬 중 연출 억제
+function edgeOn(i,p,b){ return (i&b)&&!(p&b); }
+function edgeOff(i,p,b){ return !(i&b)&&(p&b); }
+function tapDash(p,dir){
+  if(p.lastTapDir===dir && frameNo-p.lastTapF<=15) tryDash(p,dir); // 15F=250ms
+  p.lastTapDir=dir; p.lastTapF=frameNo;
+}
+let heldP2R=0; // 호스트가 받는 게스트 원격 비트
+const HELD_MAP={KeyA:[1,BIT_L],KeyD:[1,BIT_R],KeyW:[1,BIT_J],KeyS:[1,BIT_S],
+                ArrowLeft:[2,BIT_L],ArrowRight:[2,BIT_R],ArrowUp:[2,BIT_J],ArrowDown:[2,BIT_S]};
+function setHeld(code,v){
+  const m=HELD_MAP[code]; if(!m)return;
+  if(m[0]===1)heldP1=v?(heldP1|m[1]):(heldP1&~m[1]);
+  else heldP2=v?(heldP2|m[1]):(heldP2&~m[1]);
+}
+function applyPlayerInput(p,inp,prev){
+  if(edgeOn(inp,prev,BIT_L))tapDash(p,-1);
+  if(edgeOn(inp,prev,BIT_R))tapDash(p,1);
+  if(edgeOn(inp,prev,BIT_J))tryJump(p);
+  if(edgeOn(inp,prev,BIT_S)){ if(!p.onGround&&inDunkRange(p))tryDunk(p); else tryCharge(p); }
+  if(edgeOff(inp,prev,BIT_S))tryShoot(p);
+}
 
 function mkPlayer(id){
   return {id, x:0, y:GROUND-P_H, vx:0, vy:0, onGround:true, face:1,
     hasBall:false, charging:false, power:0, score:0, runPhase:0, jumpCd:0, streak:0, onFire:false, airUsed:false, fastFall:false, airDashing:false, dunkForcedMiss:false,
     dunking:false, dunkT:0, dunkTx:0, dunkTy:0, dunkDir:1,
+    lastTapDir:0, lastTapF:-99,
     dunkStartDist:0, dunkStartLowness:0, dunkStartVy:0, squash:0, wasAir:false,
     dashTimer:0, dashCd:0, dashDir:0, stunTimer:0, lastTap:0, lastKey:'',
     color: id===1?'#E84545':'#3FA7E0', dark: id===1?'#B22B2B':'#27719C',
@@ -328,42 +364,12 @@ function keyPressed(code){
     return;
   }
   if(state==='playing'){
-    if(code==='Escape'||code==='KeyP'){togglePause();return;}
+    if(code==='Escape'||code==='KeyP'){ if(NET.playing&&RB.on)return; togglePause(); return; }
     if(paused){ if(code==='KeyM')goMenu(); return; }
-    if(freeze>0)return;
-
-    // 사람이 어느 선수를 조작하는지: 2P 모드면 둘 다, CPU 모드면 선택한 쪽만
-    const p1Human=(mode==='2p')||cpuSide===1;
-    const p2Human=(mode==='2p')||cpuSide===2;
-    const now=performance.now();
-
-    // P1 (WASD)
-    if(p1Human){
-      if(code==='KeyA'||code==='KeyD'){
-        if(P1.lastKey===code && now-P1.lastTap<250){ tryDash(P1, code==='KeyA'?-1:1); }
-        P1.lastKey=code; P1.lastTap=now;
-      }
-      if(code==='KeyW')tryJump(P1);
-      if(code==='KeyS'){ if(!P1.onGround&&inDunkRange(P1))tryDunk(P1); else tryCharge(P1); }
-    }
-    // P2 (방향키)
-    if(p2Human){
-      if(code==='ArrowLeft'||code==='ArrowRight'){
-        if(P2.lastKey===code && now-P2.lastTap<250){ tryDash(P2, code==='ArrowLeft'?-1:1); }
-        P2.lastKey=code; P2.lastTap=now;
-      }
-      if(code==='ArrowUp')tryJump(P2);
-      if(code==='ArrowDown'){ if(!P2.onGround&&inDunkRange(P2))tryDunk(P2); else tryCharge(P2); }
-    }
+    // 게임플레이 입력은 step()의 프레임 샘플링(applyPlayerInput)이 전담
   }
 }
-function keyReleased(code){
-  if(state!=='playing'||paused)return;
-  const p1Human=(mode==='2p')||cpuSide===1;
-  const p2Human=(mode==='2p')||cpuSide===2;
-  if(p1Human&&code==='KeyS')tryShoot(P1);
-  if(p2Human&&code==='ArrowDown')tryShoot(P2);
-}
+function keyReleased(code){ /* 게임플레이 릴리즈도 프레임 샘플링이 전담 */ }
 function togglePause(){
   if(state!=='playing')return;
   paused=!paused;
@@ -375,7 +381,9 @@ function startGame(m){
   mode=m; state='playing'; paused=false; show(null);
   buildBg();
   P1.score=0; P2.score=0; timeLeft=GAME_TIME; suddenDeath=false;
-  for(const p of players){ p.streak=0; p.onFire=false; }
+  for(const p of players){ p.streak=0; p.onFire=false; p.lastTapDir=0; p.lastTapF=-99; }
+  frameNo=0; rngState=NET.playing?((NET.seed|0)||424242):12345; // 온라인: 공유 시드
+  prevInpP1=inpP1=heldP1; prevInpP2=inpP2=(NET.playing&&NET.role==='host')?heldP2R:heldP2;
   particles=[]; floats=[]; ghosts=[]; stealCd=0; flash=0; hitStop=0; ballTrail=[]; ball.fire=false;
   resetPositions(null);
   freeze=1.0; freezeText='READY'; freezeSub='';
@@ -431,6 +439,7 @@ function tryDash(p,dir){
   }
 }
 function tryShoot(p){
+  if(NET.guard)return; // 게스트 예측: 슛 결과는 호스트 권위
   if(!p.charging)return;
   p.charging=false;
   if(!p.hasBall){p.power=0;return;}
@@ -441,8 +450,8 @@ function tryShoot(p){
   p.face=dir;
   ball.held=null; p.hasBall=false;
   ball.x=p.x+dir*10; ball.y=p.y-8;
-  ball.vx=Math.cos(SHOT_ANGLE)*v*dir;
-  ball.vy=-Math.sin(SHOT_ANGLE)*v;
+  ball.vx=SHOT_COS*v*dir;
+  ball.vy=-SHOT_SIN*v;
   ball.shooter=p; ball.shotFrom=p.x; ball.noPickup=.4; ball.dunk=false; ball.fire=p.onFire;
   p.power=0;
   tone(200+v*18,.09,'sine',.1);
@@ -450,7 +459,7 @@ function tryShoot(p){
 
 /* 완벽한 슛 속도 계산 (CPU용) */
 function speedFor(dx,dy){
-  const c=Math.cos(SHOT_ANGLE),t=Math.tan(SHOT_ANGLE);
+  const c=SHOT_COS,t=SHOT_TAN;
   const denom=2*c*c*(dy+dx*t);
   if(denom<=0)return V_MAX;
   return Math.sqrt(BALL_GRAV*dx*dx/denom);
@@ -473,6 +482,7 @@ function dunkZoneState(p){
 }
 function inDunkRange(p){ return dunkZoneState(p)>0; }
 function tryDunk(p){
+  if(NET.guard)return; // 게스트 예측: 덩크는 호스트 권위 추종
   const zs=dunkZoneState(p);
   if(zs===0)return;
   p.dunkForcedMiss=(zs===1);
@@ -514,8 +524,8 @@ function slamBall(p){
   if(miss){
     // 림 맞고 튕겨나가는 노득점 — 튕겨서 우연히 들어가도 노골 처리
     ball.cannotScore=true;
-    ball.x=rimCx+(Math.random()*2-1)*8;ball.y=RIM_Y-2;
-    ball.vx=(p.dunkDir||1)*(2+Math.random()*2);ball.vy=-(3+Math.random()*2);
+    ball.x=rimCx+(rnd()*2-1)*8;ball.y=RIM_Y-2;
+    ball.vx=(p.dunkDir||1)*(2+rnd()*2);ball.vy=-(3+rnd()*2);
     ball.shooter=p;ball.shotFrom=p.x;ball.noPickup=.35;ball.dunk=false;
     spawnSparks(rimCx,RIM_Y,'#FF6B2B'); hitStop=.05;
     if(!forced&&!(foe&&!foe.onGround))addFloat(rimCx,RIM_Y-26,'CLANK!','#FF6B2B');
@@ -811,6 +821,17 @@ function updateCPU_for(me,foe,dt){
 /* ============ 업데이트 ============ */
 function step(dt){
   if(state!=='playing'||paused)return;
+  frameNo++;
+  // 이번 프레임 시뮬 입력 확정 (롤백: 링버퍼 주입 / 호스트권위: 원격 비트)
+  if(netInputs){ inpP1=netInputs[0]; inpP2=netInputs[1]; }
+  else { inpP1=heldP1; inpP2=(NET.playing&&NET.role==='host')?heldP2R:heldP2; }
+  if(freeze<=0&&hitStop<=0){
+    const p1H=(mode==='2p')||cpuSide===1;
+    const p2H=(mode==='2p')||cpuSide===2;
+    if(p1H)applyPlayerInput(P1,inpP1,prevInpP1);
+    if(p2H)applyPlayerInput(P2,inpP2,prevInpP2);
+  }
+  prevInpP1=inpP1; prevInpP2=inpP2;
 
   // 히트스톱: 큰 플레이 순간 잠깐 정지 (임팩트 강조)
   if(hitStop>0){ hitStop-=dt; updateFX(dt); return; }
@@ -825,7 +846,7 @@ function step(dt){
     if(p.airDashing&&p.dashTimer<=0)p.airDashing=false;
     p.stunTimer=Math.max(0,p.stunTimer-dt);
     if(p.dashTimer>0&&Math.random()<0.4)spawnDust(p.x,GROUND-2,2);
-    if(HYPER&&!RM&&(p.dashTimer>0||(p.onFire&&Math.abs(p.vx)>1.5)))ghosts.push({x:p.x,y:p.y,color:p.color,t:.32});
+    if(HYPER&&!RM&&!RESIM&&(p.dashTimer>0||(p.onFire&&Math.abs(p.vx)>1.5)))ghosts.push({x:p.x,y:p.y,color:p.color,t:.32});
     if(p.onFire&&!RM&&Math.random()<0.5)spawnFlame(p.x,p.y+22,1);
   }
 
@@ -872,8 +893,8 @@ function step(dt){
     else if(P1.dashTimer>0){P1.vx=P1.dashDir*mvSp(P1)*2.3;}
     else {
       let mv=0;
-      if(keys['KeyA'])mv-=1;
-      if(keys['KeyD'])mv+=1;
+      if(inpP1&BIT_L)mv-=1;
+      if(inpP1&BIT_R)mv+=1;
       let sp=mvSp(P1);
       if(P1.hasBall)sp*=.88;
       if(P1.charging)sp*=.45;
@@ -888,8 +909,8 @@ function step(dt){
     else if(P2.dashTimer>0){P2.vx=P2.dashDir*mvSp(P2)*2.3;}
     else {
       let mv=0;
-      if(keys['ArrowLeft'])mv-=1;
-      if(keys['ArrowRight'])mv+=1;
+      if(inpP2&BIT_L)mv-=1;
+      if(inpP2&BIT_R)mv+=1;
       let sp=mvSp(P2);
       if(P2.hasBall)sp*=.88;
       if(P2.charging)sp*=.45;
@@ -910,8 +931,8 @@ function step(dt){
     else if(P2.dashTimer>0){P2.vx=P2.dashDir*mvSp(P2)*2.3;}
     else {
       let mv=0;
-      if(keys['ArrowLeft'])mv-=1;
-      if(keys['ArrowRight'])mv+=1;
+      if(inpP2&BIT_L)mv-=1;
+      if(inpP2&BIT_R)mv+=1;
       let sp=mvSp(P2);
       if(P2.hasBall)sp*=.88;
       if(P2.charging)sp*=.45;
@@ -1021,7 +1042,7 @@ function updateBall(dt){
   for(const side of ['L','R']){
     const h=hoops[side];
     for(const lx of [h.rimX1,h.rimX2]){
-      const dx=ball.x-lx,dy=ball.y-RIM_Y,d=Math.hypot(dx,dy),rr=BALL_R+4;
+      const dx=ball.x-lx,dy=ball.y-RIM_Y,d=Math.sqrt(dx*dx+dy*dy),rr=BALL_R+4;
       if(d<rr&&d>0){
         const nx=dx/d,ny=dy/d;
         ball.x=lx+nx*rr; ball.y=RIM_Y+ny*rr;
@@ -1057,8 +1078,8 @@ function updateBall(dt){
     if(ball.dunk)break;
     if(ball.noPickup>0&&p===ball.shooter)continue;
     const cx=p.x,cy=p.y+P_H*.35;
-    const dx=ball.x-cx,dy=ball.y-cy,d=Math.hypot(dx,dy),rr=BALL_R+20;
-    const speed=Math.hypot(ball.vx,ball.vy);
+    const dx=ball.x-cx,dy=ball.y-cy,d=Math.sqrt(dx*dx+dy*dy),rr=BALL_R+20;
+    const speed=Math.sqrt(ball.vx*ball.vx+ball.vy*ball.vy);
     if(d<rr&&d>0&&speed>5.5){
       const nx=dx/d,ny=dy/d;
       ball.x=cx+nx*rr;ball.y=cy+ny*rr;
@@ -1075,7 +1096,7 @@ function updateBall(dt){
     if(ball.held)break;
     if(ball.noPickup>0&&p===ball.shooter)continue;
     const cx=p.x,cy=p.y+P_H*.45;
-    if(Math.hypot(ball.x-cx,ball.y-cy)<BALL_R+24 && p.stunTimer<=0){
+    if(((ball.x-cx)*(ball.x-cx)+(ball.y-cy)*(ball.y-cy))<(BALL_R+24)*(BALL_R+24) && p.stunTimer<=0){
       giveBall(p);
       cpu.planned=false;
     }
@@ -1113,6 +1134,7 @@ function onScore(side){
 
 function endGame(){
   state='over';
+  if(RESIM)return; // 재시뮬 중엔 상태만 — UI/사운드는 최전방에서 동기화
   SND.buzzer();
   let txt,color;
   if(P1.score>P2.score){txt='PLAYER 1 WINS!';color='var(--p1)';}
@@ -1125,8 +1147,9 @@ function endGame(){
 }
 
 /* ============ 이펙트 ============ */
-function addFloat(x,y,text,color){ floats.push({x,y,text,color,t:1,vy:-1.4,scl:0}); }
+function addFloat(x,y,text,color){ if(RESIM)return; floats.push({x,y,text,color,t:1,vy:-1.4,scl:0}); }
 function spawnConfetti(x,y){
+  if(RESIM)return;
   if(RM)return;
   const cols=['#FFC93C','#FF6B2B','#F2EDE4','#3FA7E0','#E84545'];
   for(let i=0;i<40;i++){
@@ -1136,6 +1159,7 @@ function spawnConfetti(x,y){
   }
 }
 function spawnSparks(x,y,color){
+  if(RESIM)return;
   if(RM)return;
   for(let i=0;i<14;i++){
     const a=Math.random()*Math.PI*2, sp=3+Math.random()*6;
@@ -1144,6 +1168,7 @@ function spawnSparks(x,y,color){
   }
 }
 function spawnDust(x,y,amount){
+  if(RESIM)return;
   if(RM)return;
   for(let i=0;i<(amount||8);i++){
     const a=-Math.PI/2+(Math.random()*2-1)*1.4;
@@ -1152,6 +1177,7 @@ function spawnDust(x,y,amount){
   }
 }
 function spawnFlame(x,y,n){
+  if(RESIM)return;
   if(RM)return;
   for(let i=0;i<(n||2);i++){
     particles.push({type:'flame',x:x+(Math.random()*2-1)*8,y:y+(Math.random()*2-1)*6,
@@ -1450,7 +1476,7 @@ function drawBall(){
   // 모션 트레일 (빠르게 움직일 때)
   const sp=Math.hypot(ball.vx,ball.vy);
   if(!ball.held&&sp>6&&!RM){
-    ballTrail.push({x:ball.x,y:ball.y});
+    if(!RESIM)ballTrail.push({x:ball.x,y:ball.y});
     if(ballTrail.length>9)ballTrail.shift();
   } else if(ballTrail.length){ ballTrail.shift(); }
   for(let i=0;i<ballTrail.length;i++){
@@ -1501,6 +1527,185 @@ function drawHUD(){
 /* ============ 메인 루프 ============ */
 let last=performance.now(),acc=0;
 const STEP=1000/60;
+/* ==================== 롤백용 상태 직렬화 ==================== */
+const PFIELDS=['x','y','vx','vy','face','onGround','wasAir','hasBall','charging','power','score','runPhase','jumpCd',
+  'streak','onFire','airUsed','fastFall','airDashing','dunkForcedMiss','dashTimer','dashCd','dashDir','stunTimer',
+  'squash','dunking','dunkT','dunkTx','dunkTy','dunkDir','lastTapDir','lastTapF'];
+function packState(){
+  const P=p=>PFIELDS.map(k=>p[k]);
+  return {
+    p:[P(P1),P(P2)],
+    b:[ball.x,ball.y,ball.vx,ball.vy,ball.prevY,ball.spin,
+       ball.held===P1?0:ball.held===P2?1:-1,
+       ball.shooter===P1?0:ball.shooter===P2?1:-1,
+       ball.shotFrom,ball.noPickup,ball.dunk?1:0,ball.cannotScore?1:0,ball.fire?1:0],
+    g:[timeLeft,freeze,shotLock,suddenDeath?1:0,stealCd,hitStop,frameNo,rngState,prevInpP1,prevInpP2,
+       pendingEnd?1:0, pendingReset?(pendingReset.to===null?-1:(pendingReset.to===P1?0:1)):-2,
+       state==='over'?1:0],
+    ft:freezeText, fs:freezeSub
+  };
+}
+function loadState(S){
+  const L=(p,a)=>PFIELDS.forEach((k,i)=>{ p[k]=a[i]; });
+  L(P1,S.p[0]); L(P2,S.p[1]);
+  const b=S.b;
+  ball.x=b[0];ball.y=b[1];ball.vx=b[2];ball.vy=b[3];ball.prevY=b[4];ball.spin=b[5];
+  ball.held=b[6]===0?P1:b[6]===1?P2:null;
+  ball.shooter=b[7]===0?P1:b[7]===1?P2:null;
+  ball.shotFrom=b[8];ball.noPickup=b[9];ball.dunk=!!b[10];ball.cannotScore=!!b[11];ball.fire=!!b[12];
+  const g=S.g;
+  timeLeft=g[0];freeze=g[1];shotLock=g[2];suddenDeath=!!g[3];stealCd=g[4];hitStop=g[5];
+  frameNo=g[6];rngState=g[7];prevInpP1=g[8];prevInpP2=g[9];
+  pendingEnd=!!g[10];
+  pendingReset=g[11]===-2?null:{to:g[11]===-1?null:(g[11]===0?P1:P2)};
+  state=g[12]?'over':'playing';
+  freezeText=S.ft; freezeSub=S.fs;
+}
+
+/* ==================== 롤백 넷코드 ==================== */
+let netInputs=null;
+const RB={on:false, myIdx:0, frame:0,
+  inp:new Array(256), ok:new Array(256),      // [frame&255] → [p1bits,p2bits] / [bool,bool]
+  pred:new Array(256),                        // 그 프레임에 상대 입력으로 '사용한' 값
+  snap:new Array(64),                         // [frame&63] → {f,S}
+  remoteConf:-1, remoteLastBits:0, peerFrame:0,
+  rbFrom:null, rollbacks:0, stalls:0,
+  hashes:{}, lastHashF:-1};
+function rbReset(seed){
+  RB.on=true; RB.myIdx=(NET.role==='host')?0:1; RB.frame=0;
+  RB.inp.fill(null); RB.ok.fill(null); RB.pred.fill(0); RB.snap.fill(null);
+  RB.remoteConf=-1; RB.remoteLastBits=0; RB.peerFrame=0;
+  RB.rbFrom=null; RB.rollbacks=0; RB.stalls=0; RB.hashes={}; RB.lastHashF=-1;
+  NET.seed=seed;
+}
+function rbLocalBits(){
+  return (NET.role==='host')?heldP1:
+    ((NET_HELD.L?BIT_L:0)|(NET_HELD.R?BIT_R:0)|(NET_HELD.J?BIT_J:0)|(NET_HELD.S?BIT_S:0));
+}
+function rbGetInputs(f){
+  const i=f&255, rIdx=1-RB.myIdx;
+  const cell=RB.inp[i]&&RB.inp[i].f===f?RB.inp[i]:null;
+  const mine=cell?cell.b[RB.myIdx]:0;
+  let theirs;
+  if(cell&&RB.ok[i]&&RB.ok[i][rIdx]){ theirs=cell.b[rIdx]; }
+  else { theirs=RB.remoteLastBits; RB.pred[i]=theirs; } // 예측: 직전 확정 입력 반복
+  return RB.myIdx===0?[mine,theirs]:[theirs,mine];
+}
+function rbStoreLocal(f,bits){
+  const i=f&255;
+  if(!RB.inp[i]||RB.inp[i].f!==f){ RB.inp[i]={f,b:[0,0]}; RB.ok[i]=[false,false]; }
+  RB.inp[i].b[RB.myIdx]=bits; RB.ok[i][RB.myIdx]=true;
+}
+function rbFillRemote(f,bits){
+  const rIdx=1-RB.myIdx, i=f&255;
+  if(!RB.inp[i]||RB.inp[i].f!==f){ RB.inp[i]={f,b:[0,0]}; RB.ok[i]=[false,false]; }
+  if(RB.ok[i][rIdx])return;
+  RB.inp[i].b[rIdx]=bits; RB.ok[i][rIdx]=true;
+  if(f<=RB.frame && RB.pred[i]!==bits){ RB.rbFrom=(RB.rbFrom===null)?f:Math.min(RB.rbFrom,f); }
+}
+function rbAdvanceConf(){
+  const rIdx=1-RB.myIdx;
+  let f=RB.remoteConf+1;
+  while(true){ const i=f&255; if(RB.inp[i]&&RB.inp[i].f===f&&RB.ok[i][rIdx]){ RB.remoteConf=f; RB.remoteLastBits=RB.inp[i].b[rIdx]; f++; } else break; }
+}
+function rbOnRemote(msg){ // {t:'i', f, a:[6개 비트], pf:상대 프레임}
+  const rIdx=1-RB.myIdx;
+  RB.peerFrame=Math.max(RB.peerFrame,msg.pf|0);
+  for(let k=0;k<msg.a.length;k++){
+    const f=msg.f-(msg.a.length-1)+k, bits=msg.a[k];
+    if(f<0)continue;
+    const i=f&255;
+    if(!RB.inp[i]||RB.inp[i].f!==f){ RB.inp[i]={f,b:[0,0]}; RB.ok[i]=[false,false]; }
+    if(RB.ok[i][rIdx])continue;
+    RB.inp[i].b[rIdx]=bits; RB.ok[i][rIdx]=true;
+    if(f<=RB.frame && RB.pred[i]!==bits){ RB.rbFrom=(RB.rbFrom===null)?f:Math.min(RB.rbFrom,f); }
+  }
+  rbAdvanceConf();
+  // 손실 구멍: 중복 창(6F)을 넘는 공백 → 백필 요청 (초당 3회 스로틀)
+  if(msg.f-RB.remoteConf>6){
+    if(RB.reqF===undefined||msg.f-RB.reqF>10){
+      RB.reqF=msg.f;
+      if(NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'req',from:RB.remoteConf+1}));
+    }
+  }
+}
+function rbDoRollback(){
+  const from=RB.rbFrom; RB.rbFrom=null;
+  const si=(from-1)&63, sn=RB.snap[si];
+  if(!sn||sn.f!==from-1){ rbRequestSync('스냅 범위 밖'); return; }
+  loadState(sn.S);
+  RESIM=true;
+  for(let f=from;f<=RB.frame;f++){
+    netInputs=rbGetInputs(f);
+    step(1/60);
+    RB.snap[f&63]={f,S:packState()};
+  }
+  RESIM=false; netInputs=null;
+  RB.rollbacks++;
+}
+function rbHash(S){ // FNV-1a
+  const str=JSON.stringify(S); let h=0x811c9dc5;
+  for(let i=0;i<str.length;i++){ h^=str.charCodeAt(i); h=Math.imul(h,0x01000193); }
+  return h>>>0;
+}
+function rbRequestSync(why){
+  console.warn('[RB] 리싱크 요청:',why);
+  if(NET.role==='guest'&&NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'needsync'}));
+}
+function rbSendInputs(f){
+  if(!NET.dc||NET.dc.readyState!=='open')return;
+  const arr=[]; for(let k=5;k>=0;k--){ const ff=f-k, i=ff&255;
+    arr.push((ff>=0&&RB.inp[i]&&RB.inp[i].f===ff)?RB.inp[i].b[RB.myIdx]:0); }
+  NET.dc.send(JSON.stringify({t:'i',f,a:arr,pf:RB.frame}));
+}
+function rbAdvance(){
+  if(RB.rbFrom!==null&&RB.rbFrom<=RB.frame)rbDoRollback();
+  // 양보(스톨·페이싱) 통합: 어떤 이유로 멈추든 하트비트는 계속 흘려 상호 교착 방지
+  const stallGap=RB.frame-RB.remoteConf>12;      // 확정 지연 → 스냅 링 보호
+  const paceGap =RB.frame-RB.peerFrame>6;        // 상대보다 과도하게 앞섬
+  if(stallGap||paceGap){
+    RB.stalls++;
+    if(RB.stalls%4===1){
+      rbSendInputs(RB.frame); // 하트비트: pf 갱신 + 상대의 갭 감지 재료
+      if(stallGap&&NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'req',from:RB.remoteConf+1}));
+    }
+    return;
+  }
+  const f=RB.frame+1;
+  const my=rbLocalBits();
+  rbStoreLocal(f,my);
+  rbSendInputs(f);
+  netInputs=rbGetInputs(f);
+  step(1/60);
+  netInputs=null;
+  RB.frame=f;
+  RB.snap[f&63]={f,S:packState()};
+  // 주기 해시 (양쪽 확정 구간만)
+  const hf=Math.min(RB.remoteConf,RB.frame);
+  if(hf>=60&&hf-RB.lastHashF>=60){
+    const si=hf&63, sn=RB.snap[si];
+    if(sn&&sn.f===hf){
+      RB.lastHashF=hf;
+      const h=rbHash(sn.S);
+      if(NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'h',f:hf,h}));
+      if(RB.hashes[hf]!==undefined){ if(RB.hashes[hf]!==h)rbRequestSync('해시 불일치 f'+hf); delete RB.hashes[hf]; }
+      else RB.hashes[hf]=h;
+    }
+  }
+  // 종료 UI 동기 (재시뮬로 상태가 바뀌었을 수 있음)
+  if(state==='over'&&screens.over.classList.contains('hidden')){ endGameUI(); }
+  else if(state==='playing'&&!screens.over.classList.contains('hidden')){ show(null); }
+}
+function endGameUI(){
+  let txt,color;
+  if(P1.score>P2.score){txt='PLAYER 1 WINS!';color='var(--p1)';}
+  else if(P2.score>P1.score){txt='PLAYER 2 WINS!';color='var(--p2)';}
+  else{txt='DRAW';color='var(--gold)';}
+  $('winText').textContent=txt; $('winText').style.color=color;
+  $('finalScore').textContent=P1.score+' : '+P2.score;
+  show('over'); SND.buzzer();
+}
+
 /* ==================== 온라인 (호스트 권위) ==================== */
 const NET={role:null, dc:null, chan:null, pc:null, code:'', playing:false,
   snapA:null, snapB:null, snapT:0, sendAcc:0, remote:{L:false,R:false},
@@ -1607,11 +1812,47 @@ function netTeardown(){
 }
 function netRestart(){
   NET.snapA=NET.snapB=null; NET.snapT=0; NET.sendAcc=0;
-  if(NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'start',hyper:HYPER}));
+  const seed=(Math.random()*0x7fffffff)|0;
+  if(NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'rstart',hyper:HYPER,seed}));
   NET.playing=true;
+  rbReset(seed);
   startGame('2p');
 }
 function netMsg(m){
+  if(m.t==='i'&&RB.on){ rbOnRemote(m); return; }
+  if(m.t==='h'&&RB.on){
+    if(RB.hashes[m.f]!==undefined){ if(RB.hashes[m.f]!==m.h)rbRequestSync('해시 불일치 f'+m.f); delete RB.hashes[m.f]; }
+    else RB.hashes[m.f]=m.h;
+    return;
+  }
+  if(m.t==='req'&&RB.on){
+    const from=Math.max(0,m.from|0), to=Math.min(RB.frame,from+120);
+    const a=[]; for(let f=from;f<=to;f++){ const i=f&255; a.push((RB.inp[i]&&RB.inp[i].f===f)?RB.inp[i].b[RB.myIdx]:0); }
+    if(NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'ib',from,a}));
+    return;
+  }
+  if(m.t==='ib'&&RB.on){
+    for(let k=0;k<m.a.length;k++)rbFillRemote(m.from+k,m.a[k]);
+    rbAdvanceConf();
+    return;
+  }
+  if(m.t==='needsync'&&NET.role==='host'){
+    if(NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'fullstate',f:RB.frame,S:packState()}));
+    return;
+  }
+  if(m.t==='fullstate'&&NET.role==='guest'){
+    loadState(m.S); RB.frame=m.f; RB.remoteConf=Math.max(RB.remoteConf,m.f); RB.rbFrom=null;
+    RB.snap.fill(null); RB.snap[m.f&63]={f:m.f,S:m.S}; RB.hashes={};
+    console.warn('[RB] 풀 리싱크 f'+m.f);
+    return;
+  }
+  if(m.t==='rstart'&&NET.role==='guest'){
+    if(HYPER!==!!m.hyper)toggleHyper();
+    NET.playing=true;
+    rbReset(m.seed);
+    startGame('2p');
+    return;
+  }
   if(m.t==='start'&&NET.role==='guest'){
     if(HYPER!==!!m.hyper)toggleHyper();
     NET.snapA=NET.snapB=null; NET.snapT=0; NET.authP2=null; NET.ring.length=0;
@@ -1627,26 +1868,22 @@ function netMsg(m){
 
 /* --- 호스트: 게스트 입력 → P2 --- */
 function netApplyRemoteKey(a,v){
-  if(state!=='playing')return;
-  if(a==='L'){ keys['ArrowLeft']=v; if(v)netP2Tap(-1); }
-  else if(a==='R'){ keys['ArrowRight']=v; if(v)netP2Tap(1); }
-  else if(a==='J'){ if(v)tryJump(P2); }
-  else if(a==='S'){
-    if(v){ if(!P2.onGround&&inDunkRange(P2))tryDunk(P2); else tryCharge(P2); }
-    else tryShoot(P2);
-  }
-}
-function netP2Tap(dir){ // 게스트 더블탭 대시 재현 (호스트 수신 시각 기준)
-  const now=performance.now();
-  const code=dir<0?'ArrowLeft':'ArrowRight';
-  if(P2.lastKey===code && now-P2.lastTap<250) tryDash(P2,dir);
-  P2.lastKey=code; P2.lastTap=now;
+  const b=a==='L'?BIT_L:a==='R'?BIT_R:a==='J'?BIT_J:BIT_S;
+  heldP2R=v?(heldP2R|b):(heldP2R&~b);
+  // 에지·더블탭 판정은 step의 프레임 샘플링이 프레임 번호 기준으로 수행
 }
 
 /* --- 게스트 예측 (P2 로컬 시뮬) + 스무스 보정 --- */
 function guestPredict(dt){
   const p=P2;
   if(state!=='playing'||freeze>0||p.dunking)return;
+  frameNo++;
+  const gi=(NET_HELD.L?BIT_L:0)|(NET_HELD.R?BIT_R:0)|(NET_HELD.J?BIT_J:0)|(NET_HELD.S?BIT_S:0);
+  NET.guard=true;
+  applyPlayerInput(p,gi,NET.prevGi|0);
+  NET.guard=false;
+  if(edgeOff(gi,NET.prevGi|0,BIT_S))p.charging=false; // 릴리즈 게이지 즉시 반영 (실제 슛은 호스트 권위)
+  NET.prevGi=gi;
   // 스킬 타이머 (호스트 step과 동일 규칙)
   p.dashCd=Math.max(0,p.dashCd-dt);
   p.dashTimer=Math.max(0,p.dashTimer-dt);
@@ -1714,21 +1951,7 @@ function netGuestKey(code,v){
   if(NET_HELD[a]===v)return true;
   NET_HELD[a]=v;
   if(NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'k',a,v}));
-  if(NET.predict)netPredictEdge(a,v); // 같은 입력을 로컬 예측에도 즉시 적용
-  return true;
-}
-function netPredictEdge(a,v){
-  if(state!=='playing')return;
-  if(a==='J'&&v){ tryJump(P2); }
-  else if(a==='S'){
-    if(v){ if(P2.hasBall&&!P2.charging){ P2.charging=true; P2.power=0; } }
-    else { P2.charging=false; } // 실제 슛 결과는 호스트 권위 — 게이지만 즉시 반응
-  }
-  else if((a==='L'||a==='R')&&v){
-    const dir=a==='L'?-1:1, now=performance.now();
-    if(NET.tapDir===dir&&now-NET.tapAt<250){ NET.guard=true; tryDash(P2,dir); NET.guard=false; }
-    NET.tapDir=dir; NET.tapAt=now;
-  }
+  return true; // 로컬 예측은 guestPredict의 프레임 샘플링이 수행
 }
 
 /* --- 스냅샷 직렬화 --- */
@@ -1785,6 +2008,14 @@ function netApplySnap(d,lerpD){
 function loop(now){
   let dt=now-last;last=now;
   if(dt>60)dt=60;
+  if(NET.playing&&RB.on){
+    acc+=dt;
+    while(acc>=STEP){ rbAdvance(); acc-=STEP; }
+    draw();
+    if((RB.frame&63)===0)netStatus(`P2P 롤백 · f${RB.frame} · 확정지연 ${Math.max(0,RB.frame-RB.remoteConf)}F · rb ${RB.rollbacks}`);
+    requestAnimationFrame(loop);
+    return;
+  }
   if(NET.role==='guest'&&NET.playing){
     acc+=dt;
     while(acc>=STEP){
