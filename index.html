@@ -219,6 +219,7 @@ addEventListener('keydown',e=>{
   if(NET.playing&&NET.role==='guest'){
     if(!e.repeat){
       if(e.code==='Escape'){ netTeardown(); return; }
+      if(e.code==='KeyN'&&RB.on){ netDbg=!netDbg; return; }
       netGuestKey(e.code,true);
     }
     return; // 게스트 로컬 시뮬 입력 차단 (전부 호스트로 위임)
@@ -364,6 +365,7 @@ function keyPressed(code){
     return;
   }
   if(state==='playing'){
+    if(code==='KeyN'&&NET.playing&&RB.on){ netDbg=!netDbg; return; }
     if(code==='Escape'||code==='KeyP'){ if(NET.playing&&RB.on)return; togglePause(); return; }
     if(paused){ if(code==='KeyM')goMenu(); return; }
     // 게임플레이 입력은 step()의 프레임 샘플링(applyPlayerInput)이 전담
@@ -1564,6 +1566,8 @@ function loadState(S){
 
 /* ==================== 롤백 넷코드 ==================== */
 let netInputs=null;
+const RPREV={p1x:0,p1y:0,p2x:0,p2y:0,bx:0,by:0};
+let netDbg=false, dbgFps=60, dbgLastT=0, dbgRbWin=[];
 const RB={on:false, myIdx:0, frame:0,
   inp:new Array(256), ok:new Array(256),      // [frame&255] → [p1bits,p2bits] / [bool,bool]
   pred:new Array(256),                        // 그 프레임에 상대 입력으로 '사용한' 값
@@ -1575,7 +1579,7 @@ function rbReset(seed){
   RB.on=true; RB.myIdx=(NET.role==='host')?0:1; RB.frame=0;
   RB.inp.fill(null); RB.ok.fill(null); RB.pred.fill(0); RB.snap.fill(null);
   RB.remoteConf=-1; RB.remoteLastBits=0; RB.peerFrame=0;
-  RB.rbFrom=null; RB.rollbacks=0; RB.stalls=0; RB.hashes={}; RB.lastHashF=-1; RB.vis=null; RB.peerLag=0;
+  RB.rbFrom=null; RB.rollbacks=0; RB.stalls=0; RB.hashes={}; RB.lastHashF=-1; RB.vis=null; RB.peerLag=0; RB.tScale=1; RB.lastCorr=0;
   NET.seed=seed;
 }
 function rbLocalBits(){
@@ -1648,6 +1652,9 @@ function rbDoRollback(){
   }
   RESIM=false; netInputs=null;
   RB.rollbacks++;
+  const rp=RB.myIdx===0?P2:P1;
+  RB.lastCorr=Math.abs(rp.x-(RB.myIdx===0?RPREV.p2x:RPREV.p1x));
+  dbgRbWin.push(performance.now());
 }
 function rbHash(S){ // FNV-1a
   const str=JSON.stringify(S); let h=0x811c9dc5;
@@ -1666,19 +1673,21 @@ function rbSendInputs(f){
 }
 function rbAdvance(){
   if(RB.rbFrom!==null&&RB.rbFrom<=RB.frame)rbDoRollback();
-  // 양보(스톨·지연균형) 통합: 어떤 이유로 멈추든 하트비트는 계속 흘려 상호 교착 방지
+  // 지연 균형: 정지 대신 시간 팽창 (리더는 -, 팔로워는 + 미세 속도) — 히치 없음
   const myLag=RB.frame-RB.remoteConf;
-  const stallGap=myLag>12;                              // 확정 지연 → 스냅 링 보호
-  const paceGap =(myLag>RB.peerLag+1&&(RB.frame&3)===0) // 지연 균형: 리더가 주기적으로 양보
-               ||RB.frame-RB.peerFrame>10;              // 백스톱
-  if(stallGap||paceGap){
+  RB.tScale=Math.max(.97,Math.min(1.03, 1-(myLag-RB.peerLag)*.004 ));
+  // 진짜 기아 상태(확정 12F 초과)만 정지 + 백필
+  if(myLag>12){
     RB.stalls++;
     if(RB.stalls%4===1){
-      rbSendInputs(RB.frame); // 하트비트: pf 갱신 + 상대의 갭 감지 재료
-      if(stallGap&&NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'req',from:RB.remoteConf+1}));
+      rbSendInputs(RB.frame);
+      if(NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'req',from:RB.remoteConf+1}));
     }
     return;
   }
+  // 렌더 보간용 이전 상태 캡처 (전진 직전)
+  RPREV.p1x=P1.x;RPREV.p1y=P1.y;RPREV.p2x=P2.x;RPREV.p2y=P2.y;RPREV.bx=ball.x;RPREV.by=ball.y;
+  RB.lastAdvT=performance.now();
   const f=RB.frame+1;
   const my=rbLocalBits();
   rbStoreLocal(f,my);
@@ -1703,6 +1712,25 @@ function rbAdvance(){
   // 종료 UI 동기 (재시뮬로 상태가 바뀌었을 수 있음)
   if(state==='over'&&screens.over.classList.contains('hidden')){ endGameUI(); }
   else if(state==='playing'&&!screens.over.classList.contains('hidden')){ show(null); }
+}
+function drawNetDbg(){
+  const nw=performance.now();
+  dbgFps=dbgFps*.95+.05*(1000/Math.max(1,nw-dbgLastT)); dbgLastT=nw;
+  while(dbgRbWin.length&&nw-dbgRbWin[0]>2000)dbgRbWin.shift();
+  const myLag=RB.frame-RB.remoteConf;
+  ctx.save();
+  ctx.fillStyle='rgba(10,14,28,.8)'; ctx.fillRect(8,56,232,96);
+  ctx.fillStyle='#8BE9A8'; ctx.font='700 11px monospace'; ctx.textAlign='left';
+  const L=[
+    `fps ${dbgFps.toFixed(1)}  f${RB.frame}`,
+    `내 대기 ${myLag}F · 상대 ${RB.peerLag}F`,
+    `시간팽창 ×${(RB.tScale||1).toFixed(3)}`,
+    `롤백 ${(dbgRbWin.length/2).toFixed(1)}/s · 총 ${RB.rollbacks}`,
+    `최근 정정 ${RB.lastCorr.toFixed(1)}px`,
+    `스톨 ${RB.stalls} · 확정 f${RB.remoteConf}`
+  ];
+  L.forEach((t,i)=>ctx.fillText(t,16,74+i*14));
+  ctx.restore();
 }
 function endGameUI(){
   let txt,color;
@@ -2017,21 +2045,30 @@ function loop(now){
   let dt=now-last;last=now;
   if(dt>60)dt=60;
   if(NET.playing&&RB.on){
-    acc+=dt;
+    acc+=dt*(RB.tScale||1);
     while(acc>=STEP){ rbAdvance(); acc-=STEP; }
-    // 원격 캐릭터 시각 스무딩: 정정 팝을 3~4프레임에 걸쳐 흡수 (판정은 시뮬 위치 그대로)
-    const rp=RB.myIdx===0?P2:P1;
-    if(!RB.vis)RB.vis={x:rp.x,y:rp.y};
-    const vdx=rp.x-RB.vis.x, vdy=rp.y-RB.vis.y;
-    if(Math.abs(vdx)>60||Math.abs(vdy)>60){ RB.vis.x=rp.x; RB.vis.y=rp.y; } // 리셋·리싱크는 즉시
-    else { RB.vis.x+=vdx*.4; RB.vis.y+=vdy*.4; }
-    const sx=rp.x, sy=rp.y, bh=(ball.held===rp);
-    const bx=ball.x, by=ball.y;
-    rp.x=RB.vis.x; rp.y=RB.vis.y;
-    if(bh){ ball.x+=RB.vis.x-sx; ball.y+=RB.vis.y-sy; } // 들고 있는 공은 손을 따라감
+    // ── 렌더 파이프라인: ①고정스텝→주사율 보간 ②원격 캐릭터 정정 스무딩 ③오버레이 ──
+    const al=Math.max(0,Math.min(1,acc/STEP));
+    const sx1=P1.x,sy1=P1.y,sx2=P2.x,sy2=P2.y,sbx=ball.x,sby=ball.y;
+    // ① 보간 좌표
+    const i1x=RPREV.p1x+(sx1-RPREV.p1x)*al, i1y=RPREV.p1y+(sy1-RPREV.p1y)*al;
+    const i2x=RPREV.p2x+(sx2-RPREV.p2x)*al, i2y=RPREV.p2y+(sy2-RPREV.p2y)*al;
+    // ② 원격만 vis로 스무딩 (보간 좌표를 목표로 수렴)
+    const rIs2=(RB.myIdx===0);
+    const rtx=rIs2?i2x:i1x, rty=rIs2?i2y:i1y;
+    if(!RB.vis)RB.vis={x:rtx,y:rty};
+    const vdx=rtx-RB.vis.x, vdy=rty-RB.vis.y;
+    if(Math.abs(vdx)>60||Math.abs(vdy)>60){ RB.vis.x=rtx; RB.vis.y=rty; }
+    else { RB.vis.x+=vdx*.45; RB.vis.y+=vdy*.45; }
+    // 적용: 내 캐릭터=보간, 상대=스무딩
+    P1.x=rIs2?i1x:RB.vis.x; P1.y=rIs2?i1y:RB.vis.y;
+    P2.x=rIs2?RB.vis.x:i2x; P2.y=rIs2?RB.vis.y:i2y;
+    if(!ball.held){ ball.x=RPREV.bx+(sbx-RPREV.bx)*al; ball.y=RPREV.by+(sby-RPREV.by)*al; }
+    else if(ball.held===P1){ ball.x+=P1.x-sx1; ball.y+=P1.y-sy1; }
+    else { ball.x+=P2.x-sx2; ball.y+=P2.y-sy2; }
     draw();
-    rp.x=sx; rp.y=sy;
-    if(bh){ ball.x=bx; ball.y=by; }
+    if(netDbg)drawNetDbg();
+    P1.x=sx1;P1.y=sy1;P2.x=sx2;P2.y=sy2;ball.x=sbx;ball.y=sby;
     if((RB.frame&63)===0)netStatus(`P2P 롤백 · f${RB.frame} · 확정지연 ${Math.max(0,RB.frame-RB.remoteConf)}F · rb ${RB.rollbacks}`);
     requestAnimationFrame(loop);
     return;
