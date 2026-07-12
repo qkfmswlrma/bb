@@ -1754,7 +1754,14 @@ const NET={role:null, dc:null, chan:null, pc:null, code:'', playing:false,
   predict:true, authP2:null, ring:[], tapDir:0, tapAt:0, guard:false};
 const SB_URL='https://jbetmfiantxekhfzbrld.supabase.co';
 const SB_ANON='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpiZXRtZmlhbnR4ZWtoZnpicmxkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM2NjI5MjAsImV4cCI6MjA5OTIzODkyMH0.6Dp2lyVzauQ1OzklvMoLOAF092FqpNbC_7OBdk_XSFo';
-const NET_ICE={iceServers:[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun1.l.google.com:19302'}]};
+const NET_ICE={iceServers:[
+  {urls:'stun:stun.l.google.com:19302'},
+  {urls:'stun:stun1.l.google.com:19302'},
+  // TURN 폴백 (무료 공개 릴레이): 직결(host/srflx) 전부 실패 시에만 ICE가 자동 선택 — AP 격리 대응
+  {urls:'turn:openrelay.metered.ca:80',  username:'openrelayproject', credential:'openrelayproject'},
+  {urls:'turn:openrelay.metered.ca:443', username:'openrelayproject', credential:'openrelayproject'},
+  {urls:'turn:openrelay.metered.ca:443?transport=tcp', username:'openrelayproject', credential:'openrelayproject'}
+]};
 let sbClient=null;
 function netStatus(t){ const el=$('netStatus'); if(el)el.textContent=t; }
 function netMakeCode(){ const a='ABCDEFGHJKMNPQRSTUVWXYZ23456789'; let c=''; for(let i=0;i<4;i++)c+=a[Math.floor(Math.random()*a.length)]; return c; }
@@ -1924,9 +1931,26 @@ async function netSignal(m){
     netStatus('오류: '+e.message);
   }
 }
+async function netReportPath(){
+  try{
+    const stats=await NET.pc.getStats();
+    let pair=null, cands={};
+    stats.forEach(r=>{ if(r.type==='local-candidate'||r.type==='remote-candidate')cands[r.id]=r;
+                       if(r.type==='candidate-pair'&&r.state==='succeeded'&&r.nominated)pair=r; });
+    if(pair){
+      const l=cands[pair.localCandidateId], rm=cands[pair.remoteCandidateId];
+      const lt=l&&l.candidateType, rt=rm&&rm.candidateType;
+      const relay=(lt==='relay'||rt==='relay');
+      NET.path=relay?'릴레이':(lt==='host'&&rt==='host'?'로컬 직결':'STUN 직결');
+      console.log('[NET] 경로:',lt,'↔',rt,relay?'(TURN 릴레이 — 지연 증가 가능)':'');
+      netStatus('연결됨 · '+(NET.role==='host'?'당신=P1':'당신=P2')+' · '+NET.path);
+    }
+  }catch(e){}
+}
 function netWire(){
   NET.dc.onopen=()=>{
     netStatus('연결됨 · '+(NET.role==='host'?'당신=P1':'당신=P2'));
+    netReportPath();
     if(NET.chan){ NET.chan.unsubscribe(); NET.chan=null; }
     if(NET.role==='host')netRestart();
   };
