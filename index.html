@@ -216,6 +216,9 @@ const SND={
 const keys={};
 addEventListener('keydown',e=>{
   audio();
+  // 텍스트 입력칸(방 코드 등) 포커스 중엔 게임 단축키 일절 개입 안 함
+  const ae=document.activeElement;
+  if(ae&&(ae.tagName==='INPUT'||ae.tagName==='TEXTAREA'))return;
   if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'].includes(e.code))e.preventDefault();
   if(NET.playing&&NET.role==='guest'){
     if(!e.repeat){
