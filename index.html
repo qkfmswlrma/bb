@@ -82,6 +82,7 @@
   <button class="btn ghost" id="btnHyper">⚡ 하이퍼모드: OFF <span class="key">3</span></button>
     <button class="btn ghost" id="btnHelp">📖 게임 설명 <span class="key">4</span></button>
     <div style="display:flex;gap:10px;align-items:center;margin-top:6px;flex-wrap:wrap;justify-content:center">
+      <button class="btn" id="btnNetMatch">⚡ 빠른 매칭</button>
       <button class="btn" id="btnNetHost">🌐 온라인 방 만들기</button>
       <input id="netCode" maxlength="4" placeholder="CODE" style="background:#0A0E1C;border:1px solid #2A3354;color:#F2EDE4;border-radius:8px;padding:10px;width:100px;text-align:center;letter-spacing:4px;font-family:monospace;text-transform:uppercase;font-size:16px">
       <button class="btn ghost" id="btnNetJoin">참가</button>
@@ -318,6 +319,7 @@ function toggleHyper(){
 $('btnHyper').onclick=()=>{audio();toggleHyper();};
 $('btnHelp').onclick=()=>{audio();state='help';show('help');};
 $('btnNetHost').onclick=()=>{audio();netHost();};
+$('btnNetMatch').onclick=()=>{audio(); if(MM.on)mmStop(); else mmStart();};
 $('btnNetJoin').onclick=()=>{audio();netJoin();};
 $('btnHelpBack').onclick=()=>{state='menu';show('menu');};
 $('btn2p').onclick=()=>{audio();startGame('2p');};
@@ -1012,9 +1014,10 @@ function updateBall(dt){
     else if(p.charging){ ball.x=p.x; ball.y=p.y-16; }
     else if(!p.onGround){ ball.x=p.x+p.face*12; ball.y=p.y+18; }
     else { // 드리블
-      const t=performance.now()*.012;
+      // 결정론: 벽시계+sin 대신 프레임 기반 삼각파 (기계·엔진 무관 비트 동일)
+      const ph=(frameNo%16)/16;
       const hand=p.y+30, floor=GROUND-BALL_R;
-      const k=Math.abs(Math.sin(t));
+      const k=1-Math.abs(1-2*ph);
       ball.x=p.x+p.face*16;
       ball.y=hand+(floor-hand)*k;
       if(k>.97)SND.bounce(.2);
@@ -1753,6 +1756,91 @@ let sbClient=null;
 function netStatus(t){ const el=$('netStatus'); if(el)el.textContent=t; }
 function netMakeCode(){ const a='ABCDEFGHJKMNPQRSTUVWXYZ23456789'; let c=''; for(let i=0;i<4;i++)c+=a[Math.floor(Math.random()*a.length)]; return c; }
 
+/* ===== 빠른 매칭: Supabase Presence 로비 ===== */
+const MM={on:false, chan:null, id:'', joinedAt:0, proposal:null, awaitGo:null, result:null, timer:null, lastFail:null};
+async function mmStart(){
+  if(MM.on||NET.playing)return;
+  if(!sbClient)sbClient=supabase.createClient(SB_URL,SB_ANON);
+  MM.on=true; MM.result=null; MM.proposal=null; MM.awaitGo=null;
+  MM.id=Math.random().toString(36).slice(2,10);
+  MM.joinedAt=Date.now();
+  const b=$('btnNetMatch'); if(b)b.textContent='매칭 취소';
+  netStatus('매칭 대기 중...');
+  MM.chan=sbClient.channel('bball-mm',{config:{presence:{key:MM.id},broadcast:{self:false}}});
+  MM.chan.on('presence',{event:'sync'},()=>mmScan());
+  MM.chan.on('broadcast',{event:'mm'},({payload})=>mmOnMsg(payload));
+  try{
+    await new Promise((res,rej)=>MM.chan.subscribe(async st=>{
+      if(st==='SUBSCRIBED'){ try{await MM.chan.track({t:MM.joinedAt});}catch(e){} res(); }
+      else if(st==='CHANNEL_ERROR'||st==='TIMED_OUT')rej(new Error(st));
+    }));
+  }catch(e){ netStatus('매칭 접속 실패'); mmStop(); return; }
+  if(!MM.on)return;
+  MM.timer=setInterval(mmTick,1000);
+}
+function mmStop(){
+  MM.on=false;
+  if(MM.timer){clearInterval(MM.timer);MM.timer=null;}
+  if(MM.chan){ try{MM.chan.unsubscribe();}catch(e){} MM.chan=null; }
+  const b=$('btnNetMatch'); if(b)b.textContent='⚡ 빠른 매칭';
+}
+function mmPeers(){
+  if(!MM.chan||!MM.chan.presenceState)return [];
+  const st=MM.chan.presenceState(), out=[];
+  for(const k in st){ if(k===MM.id)continue; const m=(st[k]&&st[k][0])||{}; out.push({id:k,t:m.t||0}); }
+  out.sort((a,b)=>(a.t-b.t)||(a.id<b.id?-1:1));
+  return out;
+}
+function mmScan(){
+  if(!MM.on||MM.result)return;
+  const peers=mmPeers();
+  netStatus(`매칭 대기 중... (대기 ${peers.length+1}명)`);
+  if(MM.proposal||MM.awaitGo)return;
+  const target=mmPickTarget(peers.filter(p=>MM.id<p.id)); // id 작은 쪽이 선제안
+  if(target)mmPropose(target.id);
+}
+function mmPickTarget(cand){ // 직전 실패 대상은 한 바퀴 회피 (유령 고착 방지)
+  if(!cand.length)return null;
+  return cand.find(p=>p.id!==MM.lastFail)||cand[0];
+}
+function mmPropose(to){
+  MM.proposal={to,code:netMakeCode(),at:Date.now()};
+  MM.chan.send({type:'broadcast',event:'mm',payload:{type:'propose',from:MM.id,to,code:MM.proposal.code}});
+}
+function mmOnMsg(m){
+  if(!MM.on||MM.result)return;
+  if(m.type==='propose'&&m.to===MM.id){
+    if(MM.awaitGo)return;                 // 이미 다른 제안에 수락 대기 중
+    if(MM.proposal&&MM.id<m.from)return;  // 교차 제안: id 작은 내 제안이 우선
+    MM.proposal=null;                     // 수락으로 전환 — 내 제안은 폐기 (이중 확정 방지)
+    MM.chan.send({type:'broadcast',event:'mm',payload:{type:'accept',from:MM.id,to:m.from}});
+    MM.awaitGo={to:m.from,code:m.code,at:Date.now()}; // 확정은 go 수신 시
+  } else if(m.type==='accept'&&m.to===MM.id&&MM.proposal&&m.from===MM.proposal.to){
+    MM.chan.send({type:'broadcast',event:'mm',payload:{type:'go',from:MM.id,to:m.from}});
+    MM.result={role:'host',code:MM.proposal.code};
+    mmFinish();
+  } else if(m.type==='go'&&m.to===MM.id&&MM.awaitGo&&m.from===MM.awaitGo.to){
+    MM.result={role:'guest',code:MM.awaitGo.code};
+    mmFinish();
+  }
+}
+function mmTick(){
+  if(!MM.on||MM.result)return;
+  if(MM.awaitGo){
+    if(Date.now()-MM.awaitGo.at>2000){ MM.awaitGo=null; mmScan(); } // 확인 유실 → 복귀
+  } else if(MM.proposal){
+    if(Date.now()-MM.proposal.at>3500){ MM.lastFail=MM.proposal.to; MM.proposal=null; mmScan(); } // 무응답 → 대상 회피 재탐색
+  } else if(Date.now()-MM.joinedAt>4000){
+    const t=mmPickTarget(mmPeers()); if(t)mmPropose(t.id); // 폴백: id 큰 쪽도 제안 (대칭 정지 방지)
+  } else mmScan();
+}
+function mmFinish(){
+  const r=MM.result;
+  mmStop();
+  netStatus('매칭 성사! 연결 중...');
+  if(r.role==='host')netHost(r.code); else netJoinWith(r.code);
+}
+
 async function netChannel(code){
   if(!sbClient)sbClient=supabase.createClient(SB_URL,SB_ANON);
   NET.chan=sbClient.channel('bball-'+code,{config:{broadcast:{self:false}}});
@@ -1761,14 +1849,17 @@ async function netChannel(code){
 }
 function netSig(p){ NET.chan.send({type:'broadcast',event:'sig',payload:p}); }
 
-async function netHost(){
-  NET.role='host'; NET.code=netMakeCode();
+async function netHost(preset){
+  NET.role='host'; NET.code=preset||netMakeCode();
   netStatus('코드 '+NET.code+' · 상대 대기중...');
   try{ await netChannel(NET.code); }catch(e){ netStatus('시그널링 실패'); NET.role=null; return; }
 }
 async function netJoin(){
   const code=($('netCode').value||'').trim().toUpperCase();
   if(code.length!==4){ netStatus('4자리 코드 필요'); return; }
+  return netJoinWith(code);
+}
+async function netJoinWith(code){
   NET.role='guest'; NET.code=code;
   netStatus('접속 중...');
   try{ await netChannel(code); }catch(e){ netStatus('시그널링 실패'); NET.role=null; return; }
