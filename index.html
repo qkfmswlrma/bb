@@ -222,8 +222,12 @@ addEventListener('keydown',e=>{
   if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'].includes(e.code))e.preventDefault();
   if(NET.playing&&NET.role==='guest'){
     if(!e.repeat){
-      if(e.code==='Escape'){ netTeardown(); return; }
+      if(e.code==='Escape'){ netEscQuit(); return; }
       if(e.code==='KeyN'&&RB.on){ netDbg=!netDbg; return; }
+      if(state==='over'){
+        if(e.code==='KeyR'){ guestAskRematch(); return; }
+        if(e.code==='KeyM'){ goMenu(); return; }
+      }
       netGuestKey(e.code,true);
     }
     return; // 게스트 로컬 시뮬 입력 차단 (전부 호스트로 위임)
@@ -238,6 +242,11 @@ addEventListener('keyup',e=>{
   if(NET.playing&&NET.role==='host'&&e.code.startsWith('Arrow'))return;
   keys[e.code]=false; keyReleased(e.code);
   setHeld(e.code,false);
+});
+addEventListener('blur',()=>{ // 창 전환 시 키 끼임 방지
+  heldP1=0; heldP2=0; heldP2R=0;
+  NET_HELD.L=NET_HELD.R=NET_HELD.J=NET_HELD.S=false;
+  for(const k in keys)keys[k]=false;
 });
 
 /* ============ 게임 상태 ============ */
@@ -308,6 +317,7 @@ const screens={menu:$('menu'),diff:$('diff'),side:$('side'),pause:$('pause'),ove
 function show(name){ for(const k in screens)screens[k].classList.add('hidden'); if(name)screens[name].classList.remove('hidden'); }
 
 let cpuSide=2; // 1=플레이어가 P1(왼쪽), 2=플레이어가 P2(오른쪽)
+function cpuIs(id){ return mode==='cpu' && ((cpuSide===1&&id===2)||(cpuSide===2&&id===1)); } // 해당 id가 CPU인지
 
 function toggleHyper(){
   HYPER=!HYPER;
@@ -335,10 +345,13 @@ $('btnP2Side').onclick=()=>{audio();cpuSide=2;startGame('cpu');};
 $('btnBackSide').onclick=()=>{state='diff';show('diff');};
 $('btnResume').onclick=()=>togglePause();
 $('btnQuit').onclick=()=>goMenu();
-$('btnRematch').onclick=()=>{audio(); if(NET.playing){ if(NET.role==='host')netRestart(); } else startGame(mode);};
+$('btnRematch').onclick=()=>{audio(); if(NET.playing){ if(NET.role==='host')netRestart(); else guestAskRematch(); } else startGame(mode);};
 $('btnMenu').onclick=()=>goMenu();
 
-function goMenu(){ state='menu'; paused=false; show('menu'); }
+function goMenu(){
+  if(NET.playing||NET.dc||NET.pc){ netTeardown(); return; } // 온라인 세션은 반드시 정리 후 메뉴로
+  state='menu'; paused=false; show('menu');
+}
 
 function keyPressed(code){
   if(state==='menu'){
@@ -371,7 +384,7 @@ function keyPressed(code){
   }
   if(state==='playing'){
     if(code==='KeyN'&&NET.playing&&RB.on){ netDbg=!netDbg; return; }
-    if(code==='Escape'||code==='KeyP'){ if(NET.playing&&RB.on)return; togglePause(); return; }
+    if(code==='Escape'||code==='KeyP'){ if(NET.playing&&RB.on){ if(code==='Escape')netEscQuit(); return; } togglePause(); return; }
     if(paused){ if(code==='KeyM')goMenu(); return; }
     // 게임플레이 입력은 step()의 프레임 샘플링(applyPlayerInput)이 전담
   }
@@ -386,11 +399,13 @@ function togglePause(){
 /* ============ 게임 시작/리셋 ============ */
 function startGame(m){
   mode=m; state='playing'; paused=false; show(null);
+  $('btnRematch').innerHTML='🔁 다시하기 <span class="key">R</span>';
   buildBg();
   P1.score=0; P2.score=0; timeLeft=GAME_TIME; suddenDeath=false;
   for(const p of players){ p.streak=0; p.onFire=false; p.lastTapDir=0; p.lastTapF=-99; }
   frameNo=0; rngState=NET.playing?((NET.seed|0)||424242):12345; // 온라인: 공유 시드
-  prevInpP1=inpP1=heldP1; prevInpP2=inpP2=(NET.playing&&NET.role==='host')?heldP2R:heldP2;
+  if(NET.playing){ prevInpP1=inpP1=0; prevInpP2=inpP2=0; } // 온라인: 양측 동일 초기 상태 (결정론 — held는 첫 프레임 에지로 반영)
+  else { prevInpP1=inpP1=heldP1; prevInpP2=inpP2=heldP2; }
   particles=[]; floats=[]; ghosts=[]; stealCd=0; flash=0; hitStop=0; ballTrail=[]; ball.fire=false;
   resetPositions(null);
   freeze=1.0; freezeText='READY'; freezeSub='';
@@ -1099,15 +1114,17 @@ function updateBall(dt){
     }
   }
 
-  // 줍기
-  for(const p of players){
-    if(ball.held)break;
-    if(ball.noPickup>0&&p===ball.shooter)continue;
-    const cx=p.x,cy=p.y+P_H*.45;
-    if(((ball.x-cx)*(ball.x-cx)+(ball.y-cy)*(ball.y-cy))<(BALL_R+24)*(BALL_R+24) && p.stunTimer<=0){
-      giveBall(p);
-      cpu.planned=false;
+  // 줍기 (동시 접근 시 더 가까운 쪽이 획득 — 배열 순서에 의한 P1 고정 우선 제거)
+  if(!ball.held){
+    let best=null, bd=(BALL_R+24)*(BALL_R+24);
+    for(const p of players){
+      if(ball.noPickup>0&&p===ball.shooter)continue;
+      if(p.stunTimer>0)continue;
+      const cx=p.x,cy=p.y+P_H*.45;
+      const d=(ball.x-cx)*(ball.x-cx)+(ball.y-cy)*(ball.y-cy);
+      if(d<bd){ bd=d; best=p; }
     }
+    if(best){ giveBall(best); cpu.planned=false; }
   }
 }
 
@@ -1129,7 +1146,7 @@ function onScore(side){
   flash=dunked?.55:(pts===3?.4:.28);
   hitStop=dunked?.1:.06;
   if(dunked)SND.dunk();else if(pts===3)SND.score3();else SND.score2();
-  const name=scorer.id===1?'P1':(mode==='cpu'?'CPU':'P2');
+  const name=cpuIs(scorer.id)?'CPU':'P'+scorer.id;
   freeze=1.15;
   freezeText=dunked?'SLAM DUNK!':(pts===3?'3 POINTS!':'SWISH!');
   freezeSub=`${name} +${pts}`+(ignited?' · 🔥ON FIRE!':'');
@@ -1145,8 +1162,8 @@ function endGame(){
   if(RESIM)return; // 재시뮬 중엔 상태만 — UI/사운드는 최전방에서 동기화
   SND.buzzer();
   let txt,color;
-  if(P1.score>P2.score){txt='PLAYER 1 WINS!';color='var(--p1)';}
-  else if(P2.score>P1.score){txt=(mode==='cpu'?'CPU WINS!':'PLAYER 2 WINS!');color='var(--p2)';}
+  if(P1.score>P2.score){txt=cpuIs(1)?'CPU WINS!':'PLAYER 1 WINS!';color='var(--p1)';}
+  else if(P2.score>P1.score){txt=cpuIs(2)?'CPU WINS!':'PLAYER 2 WINS!';color='var(--p2)';}
   else{txt='DRAW';color='var(--gold)';}
   $('winText').textContent=txt;
   $('winText').style.color=color;
@@ -1356,8 +1373,8 @@ function buildBg(){
   g.fillStyle=HYPER?'#FF2E88':'#FF6B2B';g.fillRect(0,148,W,5);
   g.fillStyle='rgba(242,237,228,.08)';g.fillRect(0,80,W,4);
   // 배너
-  banner(g,120,40,'#E84545', mode==='cpu'&&cpuSide===1?'CPU':'P1');
-  banner(g,W-120,40,'#3FA7E0', mode==='cpu'&&cpuSide===2?'CPU':'P2');
+  banner(g,120,40,'#E84545', cpuIs(1)?'CPU':'P1');
+  banner(g,W-120,40,'#3FA7E0', cpuIs(2)?'CPU':'P2');
   if(HYPER){
     g.save();g.globalAlpha=.13;g.fillStyle='#FF2E88';
     g.font='bold 110px "Arial Black",sans-serif';g.textAlign='center';
@@ -1580,12 +1597,12 @@ const RB={on:false, myIdx:0, frame:0,
   snap:new Array(64),                         // [frame&63] → {f,S}
   remoteConf:-1, remoteLastBits:0, peerFrame:0,
   rbFrom:null, rollbacks:0, stalls:0,
-  hashes:{}, lastHashF:-1};
+  lastHashF:-1};
 function rbReset(seed){
   RB.on=true; RB.myIdx=(NET.role==='host')?0:1; RB.frame=0;
   RB.inp.fill(null); RB.ok.fill(null); RB.pred.fill(0); RB.snap.fill(null);
   RB.remoteConf=-1; RB.remoteLastBits=0; RB.peerFrame=0;
-  RB.rbFrom=null; RB.rollbacks=0; RB.stalls=0; RB.hashes={}; RB.lastHashF=-1; RB.vis=null; RB.peerLag=0; RB.tScale=1; RB.lastCorr=0;
+  RB.rbFrom=null; RB.rollbacks=0; RB.stalls=0; RB.lastHashF=-1; RB.vis=null; RB.peerLag=0; RB.tScale=1; RB.lastCorr=0;
   NET.seed=seed;
 }
 function rbLocalBits(){
@@ -1636,7 +1653,7 @@ function rbOnRemote(msg){ // {t:'i', f, a:[6개 비트], pf:상대 프레임}
   if(msg.f-RB.remoteConf>6){
     if(RB.reqF===undefined||msg.f-RB.reqF>10){
       RB.reqF=msg.f;
-      if(NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'req',from:RB.remoteConf+1}));
+      netSendR({t:'req',from:RB.remoteConf+1});
     }
   }
 }
@@ -1668,8 +1685,9 @@ function rbHash(S){ // FNV-1a
   return h>>>0;
 }
 function rbRequestSync(why){
-  console.warn('[RB] 리싱크 요청:',why);
-  if(NET.role==='guest'&&NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'needsync'}));
+  console.warn('[RB] 리싱크:',why);
+  if(NET.role==='guest')netSendR({t:'needsync'});
+  else netSendR({t:'fullstate',f:RB.frame,S:packState()}); // 호스트가 감지한 경우 즉시 권위 상태 전파
 }
 function rbSendInputs(f){
   if(!NET.dc||NET.dc.readyState!=='open')return;
@@ -1687,7 +1705,7 @@ function rbAdvance(){
     RB.stalls++;
     if(RB.stalls%4===1){
       rbSendInputs(RB.frame);
-      if(NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'req',from:RB.remoteConf+1}));
+      netSendR({t:'req',from:RB.remoteConf+1});
     }
     return;
   }
@@ -1709,10 +1727,7 @@ function rbAdvance(){
     const si=hf&63, sn=RB.snap[si];
     if(sn&&sn.f===hf){
       RB.lastHashF=hf;
-      const h=rbHash(sn.S);
-      if(NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'h',f:hf,h}));
-      if(RB.hashes[hf]!==undefined){ if(RB.hashes[hf]!==h)rbRequestSync('해시 불일치 f'+hf); delete RB.hashes[hf]; }
-      else RB.hashes[hf]=h;
+      netSendU({t:'h',f:hf,h:rbHash(sn.S)}); // 수신 측이 자기 스냅샷과 직접 대조
     }
   }
   // 종료 UI 동기 (재시뮬로 상태가 바뀌었을 수 있음)
@@ -1749,9 +1764,23 @@ function endGameUI(){
 }
 
 /* ==================== 온라인 (호스트 권위) ==================== */
-const NET={role:null, dc:null, chan:null, pc:null, code:'', playing:false,
+const NET={role:null, dc:null, rc:null, chan:null, pc:null, code:'', playing:false, escAt:0,
   snapA:null, snapB:null, snapT:0, sendAcc:0, remote:{L:false,R:false},
   predict:true, authP2:null, ring:[], tapDir:0, tapAt:0, guard:false};
+/* dc=비신뢰(입력·해시 등 고빈도), rc=신뢰·순서보장(rstart/fullstate/req/ib 등 제어) */
+function netSendU(o){ if(NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify(o)); }
+function netSendR(o){ const c=(NET.rc&&NET.rc.readyState==='open')?NET.rc:NET.dc; if(c&&c.readyState==='open')c.send(JSON.stringify(o)); }
+function netEscQuit(){ // 실수 방지: 경기 중엔 1.5초 내 ESC 두 번으로 나가기
+  if(state!=='playing'){ netTeardown(); return; }
+  const n=performance.now();
+  if(NET.escAt&&n-NET.escAt<1500){ netTeardown(); return; }
+  NET.escAt=n;
+  addFloat(W/2,H/2-90,'ESC 한 번 더: 나가기','#FFC93C');
+}
+function guestAskRematch(){
+  netSendR({t:'rr'});
+  $('btnRematch').innerHTML='⏳ 재경기 요청 보냄';
+}
 const SB_URL='https://jbetmfiantxekhfzbrld.supabase.co';
 const SB_ANON='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpiZXRtZmlhbnR4ZWtoZnpicmxkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM2NjI5MjAsImV4cCI6MjA5OTIzODkyMH0.6Dp2lyVzauQ1OzklvMoLOAF092FqpNbC_7OBdk_XSFo';
 const NET_ICE={iceServers:[
@@ -1853,6 +1882,7 @@ function mmFinish(){
 
 async function netChannel(code){
   if(!sbClient)sbClient=supabase.createClient(SB_URL,SB_ANON);
+  if(NET.chan){ try{NET.chan.unsubscribe();}catch(e){} NET.chan=null; } // 이전 채널 정리 (중복 시그널 방지)
   NET.chan=sbClient.channel('bball-'+code,{config:{broadcast:{self:false}}});
   NET.chan.on('broadcast',{event:'sig'},({payload})=>netSignal(payload));
   await new Promise((res,rej)=>NET.chan.subscribe(st=>{ if(st==='SUBSCRIBED')res(); if(st==='CHANNEL_ERROR'||st==='TIMED_OUT')rej(new Error(st)); }));
@@ -1860,6 +1890,8 @@ async function netChannel(code){
 function netSig(p){ NET.chan.send({type:'broadcast',event:'sig',payload:p}); }
 
 async function netHost(preset){
+  if(NET.playing)return;
+  if(MM.on)mmStop();
   NET.role='host'; NET.code=preset||netMakeCode();
   netStatus('코드 '+NET.code+' · 상대 대기중...');
   try{ await netChannel(NET.code); }catch(e){ netStatus('시그널링 실패'); NET.role=null; return; }
@@ -1870,6 +1902,8 @@ async function netJoin(){
   return netJoinWith(code);
 }
 async function netJoinWith(code){
+  if(NET.playing)return;
+  if(MM.on)mmStop();
   NET.role='guest'; NET.code=code;
   netStatus('접속 중...');
   try{ await netChannel(code); }catch(e){ netStatus('시그널링 실패'); NET.role=null; return; }
@@ -1906,14 +1940,15 @@ async function netSignal(m){
       netStatus('상대 발견 · offer 전송...');
       netPC();
       NET.dc=NET.pc.createDataChannel('game',{ordered:false,maxRetransmits:0});
-      netWire();
+      NET.rc=NET.pc.createDataChannel('ctl'); // 신뢰·순서 보장 제어 채널
+      netWire(NET.dc); netWire(NET.rc);
       const o=await NET.pc.createOffer(); await NET.pc.setLocalDescription(o);
       netSig({type:'offer',sdp:NET.pc.localDescription});
       netStatus('offer 전송됨 · answer 대기...');
     } else if(m.type==='offer'&&NET.role==='guest'){
       netStatus('offer 수신 · answer 전송...');
       netPC();
-      NET.pc.ondatachannel=e=>{ NET.dc=e.channel; netWire(); };
+      NET.pc.ondatachannel=e=>{ const ch=e.channel; if(ch.label==='ctl')NET.rc=ch; else NET.dc=ch; netWire(ch); };
       await NET.pc.setRemoteDescription(m.sdp);
       await netFlushIce();
       const a=await NET.pc.createAnswer(); await NET.pc.setLocalDescription(a);
@@ -1947,42 +1982,51 @@ async function netReportPath(){
     }
   }catch(e){}
 }
-function netWire(){
-  NET.dc.onopen=()=>{
-    netStatus('연결됨 · '+(NET.role==='host'?'당신=P1':'당신=P2'));
-    netReportPath();
-    if(NET.chan){ NET.chan.unsubscribe(); NET.chan=null; }
-    if(NET.role==='host')netRestart();
-  };
-  NET.dc.onclose=()=>{ netStatus('연결 끊김'); netTeardown(); };
-  NET.dc.onmessage=e=>netMsg(JSON.parse(e.data));
+function netWire(ch){
+  ch.onopen=()=>netMaybeReady();
+  ch.onclose=()=>netTeardown('연결 끊김');
+  ch.onmessage=e=>netMsg(JSON.parse(e.data));
 }
-function netTeardown(){
+function netMaybeReady(){ // 게임(비신뢰)+제어(신뢰) 채널이 모두 열리면 시작
+  if(!(NET.dc&&NET.dc.readyState==='open'&&NET.rc&&NET.rc.readyState==='open'))return;
+  netStatus('연결됨 · '+(NET.role==='host'?'당신=P1':'당신=P2'));
+  netReportPath();
+  if(NET.chan){ NET.chan.unsubscribe(); NET.chan=null; }
+  if(NET.role==='host')netRestart();
+}
+function netTeardown(msg){
   clearTimeout(NET.iceWatch);
-  NET.playing=false; NET.role=null;
-  if(NET.dc){try{NET.dc.close();}catch(e){}} NET.dc=null;
+  NET.playing=false; NET.role=null; RB.on=false;
+  for(const k of ['dc','rc']){ const c=NET[k]; if(c){ try{c.onopen=null;c.onmessage=null;c.onclose=null;c.close();}catch(e){} NET[k]=null; } }
   if(NET.pc){try{NET.pc.close();}catch(e){}} NET.pc=null;
-  goMenu();
+  if(NET.chan){try{NET.chan.unsubscribe();}catch(e){} NET.chan=null;}
+  NET_HELD.L=NET_HELD.R=NET_HELD.J=NET_HELD.S=false; heldP2R=0; // 잔류 입력 제거
+  netStatus(msg||'연결 종료');
+  state='menu'; paused=false; show('menu');
 }
 function netRestart(){
   NET.snapA=NET.snapB=null; NET.snapT=0; NET.sendAcc=0;
   const seed=(Math.random()*0x7fffffff)|0;
-  if(NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'rstart',hyper:HYPER,seed}));
+  netSendR({t:'rstart',hyper:HYPER,seed});
   NET.playing=true;
   rbReset(seed);
   startGame('2p');
+  RB.snap[0]={f:0,S:packState()}; // 첫 프레임 롤백 대비 기준 스냅샷
 }
 function netMsg(m){
   if(m.t==='i'&&RB.on){ rbOnRemote(m); return; }
   if(m.t==='h'&&RB.on){
-    if(RB.hashes[m.f]!==undefined){ if(RB.hashes[m.f]!==m.h)rbRequestSync('해시 불일치 f'+m.f); delete RB.hashes[m.f]; }
-    else RB.hashes[m.f]=m.h;
+    // 내 확정 구간(롤백 대기 없음, f ≤ min(확정, 현재)) 스냅샷과 직접 대조 — 주기 불일치·유실에 무관
+    if(RB.rbFrom===null&&m.f<=Math.min(RB.remoteConf,RB.frame)){
+      const sn=RB.snap[m.f&63];
+      if(sn&&sn.f===m.f&&rbHash(sn.S)!==m.h)rbRequestSync('해시 불일치 f'+m.f);
+    }
     return;
   }
   if(m.t==='req'&&RB.on){
     const from=Math.max(0,m.from|0), to=Math.min(RB.frame,from+120);
     const a=[]; for(let f=from;f<=to;f++){ const i=f&255; a.push((RB.inp[i]&&RB.inp[i].f===f)?RB.inp[i].b[RB.myIdx]:0); }
-    if(NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'ib',from,a}));
+    netSendR({t:'ib',from,a});
     return;
   }
   if(m.t==='ib'&&RB.on){
@@ -1991,20 +2035,22 @@ function netMsg(m){
     return;
   }
   if(m.t==='needsync'&&NET.role==='host'){
-    if(NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'fullstate',f:RB.frame,S:packState()}));
+    netSendR({t:'fullstate',f:RB.frame,S:packState()});
     return;
   }
   if(m.t==='fullstate'&&NET.role==='guest'){
     loadState(m.S); RB.frame=m.f; RB.remoteConf=Math.max(RB.remoteConf,m.f); RB.rbFrom=null;
-    RB.snap.fill(null); RB.snap[m.f&63]={f:m.f,S:m.S}; RB.hashes={};
+    RB.snap.fill(null); RB.snap[m.f&63]={f:m.f,S:m.S}; RB.lastHashF=m.f;
     console.warn('[RB] 풀 리싱크 f'+m.f);
     return;
   }
+  if(m.t==='rr'&&NET.role==='host'){ if(state==='over')netRestart(); return; } // 게스트 재경기 요청
   if(m.t==='rstart'&&NET.role==='guest'){
     if(HYPER!==!!m.hyper)toggleHyper();
     NET.playing=true;
     rbReset(m.seed);
     startGame('2p');
+    RB.snap[0]={f:0,S:packState()}; // 첫 프레임 롤백 대비 기준 스냅샷
     return;
   }
   if(m.t==='start'&&NET.role==='guest'){
