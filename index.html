@@ -158,7 +158,6 @@ const GRAV=0.5, BALL_GRAV=0.42;
 const MOVE=4.2, JUMPV=-11.5;
 const P_W=34, P_H=66, BALL_R=11;
 const RIM_Y=250, RIM_LEN=46;
-const SHOT_ANGLE=62*Math.PI/180;
 const SHOT_COS=0.46947156278589086, SHOT_SIN=0.882947592858927, SHOT_TAN=1.8807264653463318; // 62° 사전계산 (엔진 간 결정론)
 const V_MIN=7, V_MAX=21;
 const THREE_PT=320;
@@ -213,7 +212,6 @@ const SND={
 };
 
 /* ============ 입력 ============ */
-const keys={};
 addEventListener('keydown',e=>{
   audio();
   // 텍스트 입력칸(방 코드 등) 포커스 중엔 게임 단축키 일절 개입 안 함
@@ -230,23 +228,20 @@ addEventListener('keydown',e=>{
       }
       netGuestKey(e.code,true);
     }
-    return; // 게스트 로컬 시뮬 입력 차단 (전부 호스트로 위임)
+    return; // 게임플레이 키는 NET_HELD → 롤백 입력 비트로만 반영
   }
   if(NET.playing&&NET.role==='host'&&e.code.startsWith('Arrow'))return; // 화살표는 원격 P2 전용
   if(!e.repeat)keyPressed(e.code);
-  keys[e.code]=true;
   setHeld(e.code,true);
 });
 addEventListener('keyup',e=>{
   if(NET.playing&&NET.role==='guest'){ netGuestKey(e.code,false); return; }
   if(NET.playing&&NET.role==='host'&&e.code.startsWith('Arrow'))return;
-  keys[e.code]=false; keyReleased(e.code);
   setHeld(e.code,false);
 });
 addEventListener('blur',()=>{ // 창 전환 시 키 끼임 방지
-  heldP1=0; heldP2=0; heldP2R=0;
+  heldP1=0; heldP2=0;
   NET_HELD.L=NET_HELD.R=NET_HELD.J=NET_HELD.S=false;
-  for(const k in keys)keys[k]=false;
 });
 
 /* ============ 게임 상태 ============ */
@@ -272,7 +267,6 @@ function tapDash(p,dir){
   if(p.lastTapDir===dir && frameNo-p.lastTapF<=15) tryDash(p,dir); // 15F=250ms
   p.lastTapDir=dir; p.lastTapF=frameNo;
 }
-let heldP2R=0; // 호스트가 받는 게스트 원격 비트
 const HELD_MAP={KeyA:[1,BIT_L],KeyD:[1,BIT_R],KeyW:[1,BIT_J],KeyS:[1,BIT_S],
                 ArrowLeft:[2,BIT_L],ArrowRight:[2,BIT_R],ArrowUp:[2,BIT_J],ArrowDown:[2,BIT_S]};
 function setHeld(code,v){
@@ -290,11 +284,11 @@ function applyPlayerInput(p,inp,prev){
 
 function mkPlayer(id){
   return {id, x:0, y:GROUND-P_H, vx:0, vy:0, onGround:true, face:1,
-    hasBall:false, charging:false, power:0, score:0, runPhase:0, jumpCd:0, streak:0, onFire:false, airUsed:false, fastFall:false, airDashing:false, dunkForcedMiss:false,
+    hasBall:false, charging:false, power:0, score:0, runPhase:0, streak:0, onFire:false, airUsed:false, fastFall:false, airDashing:false, dunkForcedMiss:false,
     dunking:false, dunkT:0, dunkTx:0, dunkTy:0, dunkDir:1,
     lastTapDir:0, lastTapF:-99,
     dunkStartDist:0, dunkStartLowness:0, dunkStartVy:0, squash:0, wasAir:false,
-    dashTimer:0, dashCd:0, dashDir:0, stunTimer:0, lastTap:0, lastKey:'',
+    dashTimer:0, dashCd:0, dashDir:0, stunTimer:0,
     color: id===1?'#E84545':'#3FA7E0', dark: id===1?'#B22B2B':'#27719C',
     target: id===1?'R':'L', defend: id===1?'L':'R'};
 }
@@ -389,7 +383,6 @@ function keyPressed(code){
     // 게임플레이 입력은 step()의 프레임 샘플링(applyPlayerInput)이 전담
   }
 }
-function keyReleased(code){ /* 게임플레이 릴리즈도 프레임 샘플링이 전담 */ }
 function togglePause(){
   if(state!=='playing')return;
   paused=!paused;
@@ -413,7 +406,7 @@ function startGame(m){
 }
 function resetPositions(ballTo){
   P1.x=330; P2.x=W-330;
-  shotLock=0.01; // 시작 직후 0.8초간 슛 잠금
+  shotLock=0.01; // 리셋 직후 잔여 입력 오발 방지용 최소 잠금 (의도적으로 짧음)
   for(const p of players){ p.y=GROUND-P_H; p.vx=0;p.vy=0;p.onGround=true; p.hasBall=false; p.charging=false; p.power=0; p.dunking=false; p.squash=0; p.wasAir=false; p.dashTimer=0; p.dashCd=0; p.stunTimer=0; p.airUsed=false; p.fastFall=false; p.airDashing=false; }
   cpu.combo=null; cpu.sHeld=false;
   P1.face=1; P2.face=-1;
@@ -451,7 +444,7 @@ function tryDash(p,dir){
   if(air){ p.airUsed=true; p.airDashing=true; p.vy=0; }
   else { p.dashCd=HYPER?HY.dashCd:.9; }
   const foe=players.find(q=>q!==p);
-  if(!NET.guard&&!air&&p.hasBall&&foe&&foe.onGround&&Math.abs(p.x-foe.x)<(HYPER?150:85)){
+  if(!air&&p.hasBall&&foe&&foe.onGround&&Math.abs(p.x-foe.x)<(HYPER?150:85)){
     foe.stunTimer=.5; foe.vx=0; foe.squash=.25;
     addFloat(foe.x,foe.y-26,'ANKLE BREAK!','#FFC93C');
     SND.steal(); spawnSparks((p.x+foe.x)/2,GROUND-30,'#FFC93C'); shakeT=.1;
@@ -461,7 +454,6 @@ function tryDash(p,dir){
   }
 }
 function tryShoot(p){
-  if(NET.guard)return; // 게스트 예측: 슛 결과는 호스트 권위
   if(!p.charging)return;
   p.charging=false;
   if(!p.hasBall){p.power=0;return;}
@@ -504,7 +496,6 @@ function dunkZoneState(p){
 }
 function inDunkRange(p){ return dunkZoneState(p)>0; }
 function tryDunk(p){
-  if(NET.guard)return; // 게스트 예측: 덩크는 호스트 권위 추종
   const zs=dunkZoneState(p);
   if(zs===0)return;
   p.dunkForcedMiss=(zs===1);
@@ -562,7 +553,6 @@ function slamBall(p){
 }
 
 /* ============ CPU AI ============ */
-function updateCPU(dt){ updateCPU_for(P2,P1,dt); }
 /* ============ CPU 콤보 (하이퍼 · 어려움 전용) ============ */
 // 표기: 1문자 = 0.1초. d=림 방향 탭, a=반대 탭, w=점프 키, s=슛 키, 공백=대기
 const CPU_COMBOS={
@@ -846,7 +836,7 @@ function step(dt){
   frameNo++;
   // 이번 프레임 시뮬 입력 확정 (롤백: 링버퍼 주입 / 호스트권위: 원격 비트)
   if(netInputs){ inpP1=netInputs[0]; inpP2=netInputs[1]; }
-  else { inpP1=heldP1; inpP2=(NET.playing&&NET.role==='host')?heldP2R:heldP2; }
+  else { inpP1=heldP1; inpP2=heldP2; }
   if(freeze<=0&&hitStop<=0){
     const p1H=(mode==='2p')||cpuSide===1;
     const p2H=(mode==='2p')||cpuSide===2;
@@ -1266,7 +1256,6 @@ function draw(){
       ctx.beginPath();ctx.arc(p.x,p.y,p.s*Math.max(.15,p.life),0,7);ctx.fill();
     } else if(p.type==='spark'){
       ctx.strokeStyle=p.color;ctx.lineWidth=2.5;ctx.lineCap='round';
-      const len=p.s*2;
       ctx.beginPath();ctx.moveTo(p.x,p.y);
       ctx.lineTo(p.x-p.vx*.8,p.y-p.vy*.8);ctx.stroke();
     } else {
@@ -1553,7 +1542,7 @@ function drawHUD(){
 let last=performance.now(),acc=0;
 const STEP=1000/60;
 /* ==================== 롤백용 상태 직렬화 ==================== */
-const PFIELDS=['x','y','vx','vy','face','onGround','wasAir','hasBall','charging','power','score','runPhase','jumpCd',
+const PFIELDS=['x','y','vx','vy','face','onGround','wasAir','hasBall','charging','power','score','runPhase',
   'streak','onFire','airUsed','fastFall','airDashing','dunkForcedMiss','dashTimer','dashCd','dashDir','stunTimer',
   'squash','dunking','dunkT','dunkTx','dunkTy','dunkDir','lastTapDir','lastTapF'];
 function packState(){
@@ -1711,7 +1700,6 @@ function rbAdvance(){
   }
   // 렌더 보간용 이전 상태 캡처 (전진 직전)
   RPREV.p1x=P1.x;RPREV.p1y=P1.y;RPREV.p2x=P2.x;RPREV.p2y=P2.y;RPREV.bx=ball.x;RPREV.by=ball.y;
-  RB.lastAdvT=performance.now();
   const f=RB.frame+1;
   const my=rbLocalBits();
   rbStoreLocal(f,my);
@@ -1764,9 +1752,7 @@ function endGameUI(){
 }
 
 /* ==================== 온라인 (호스트 권위) ==================== */
-const NET={role:null, dc:null, rc:null, chan:null, pc:null, code:'', playing:false, escAt:0,
-  snapA:null, snapB:null, snapT:0, sendAcc:0, remote:{L:false,R:false},
-  predict:true, authP2:null, ring:[], tapDir:0, tapAt:0, guard:false};
+const NET={role:null, dc:null, rc:null, chan:null, pc:null, code:'', playing:false, escAt:0, seed:0};
 /* dc=비신뢰(입력·해시 등 고빈도), rc=신뢰·순서보장(rstart/fullstate/req/ib 등 제어) */
 function netSendU(o){ if(NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify(o)); }
 function netSendR(o){ const c=(NET.rc&&NET.rc.readyState==='open')?NET.rc:NET.dc; if(c&&c.readyState==='open')c.send(JSON.stringify(o)); }
@@ -2000,12 +1986,11 @@ function netTeardown(msg){
   for(const k of ['dc','rc']){ const c=NET[k]; if(c){ try{c.onopen=null;c.onmessage=null;c.onclose=null;c.close();}catch(e){} NET[k]=null; } }
   if(NET.pc){try{NET.pc.close();}catch(e){}} NET.pc=null;
   if(NET.chan){try{NET.chan.unsubscribe();}catch(e){} NET.chan=null;}
-  NET_HELD.L=NET_HELD.R=NET_HELD.J=NET_HELD.S=false; heldP2R=0; // 잔류 입력 제거
+  NET_HELD.L=NET_HELD.R=NET_HELD.J=NET_HELD.S=false; // 잔류 입력 제거
   netStatus(msg||'연결 종료');
   state='menu'; paused=false; show('menu');
 }
 function netRestart(){
-  NET.snapA=NET.snapB=null; NET.snapT=0; NET.sendAcc=0;
   const seed=(Math.random()*0x7fffffff)|0;
   netSendR({t:'rstart',hyper:HYPER,seed});
   NET.playing=true;
@@ -2053,93 +2038,9 @@ function netMsg(m){
     RB.snap[0]={f:0,S:packState()}; // 첫 프레임 롤백 대비 기준 스냅샷
     return;
   }
-  if(m.t==='start'&&NET.role==='guest'){
-    if(HYPER!==!!m.hyper)toggleHyper();
-    NET.snapA=NET.snapB=null; NET.snapT=0; NET.authP2=null; NET.ring.length=0;
-    NET.playing=true;
-    startGame('2p'); // P1·공은 권위 보간, P2는 로컬 예측
-  }
-  else if(m.t==='k'&&NET.role==='host'){ netApplyRemoteKey(m.a,m.v); }
-  else if(m.t==='s'&&NET.role==='guest'){
-    NET.snapA=NET.snapB; NET.snapB=m.d; NET.snapT=0;
-  }
-  else if(m.t==='over'){ /* 상태 스냅샷의 state로 처리됨 */ }
 }
 
-/* --- 호스트: 게스트 입력 → P2 --- */
-function netApplyRemoteKey(a,v){
-  const b=a==='L'?BIT_L:a==='R'?BIT_R:a==='J'?BIT_J:BIT_S;
-  heldP2R=v?(heldP2R|b):(heldP2R&~b);
-  // 에지·더블탭 판정은 step의 프레임 샘플링이 프레임 번호 기준으로 수행
-}
-
-/* --- 게스트 예측 (P2 로컬 시뮬) + 스무스 보정 --- */
-function guestPredict(dt){
-  const p=P2;
-  if(state!=='playing'||freeze>0||p.dunking)return;
-  frameNo++;
-  const gi=(NET_HELD.L?BIT_L:0)|(NET_HELD.R?BIT_R:0)|(NET_HELD.J?BIT_J:0)|(NET_HELD.S?BIT_S:0);
-  NET.guard=true;
-  applyPlayerInput(p,gi,NET.prevGi|0);
-  NET.guard=false;
-  if(edgeOff(gi,NET.prevGi|0,BIT_S))p.charging=false; // 릴리즈 게이지 즉시 반영 (실제 슛은 호스트 권위)
-  NET.prevGi=gi;
-  // 스킬 타이머 (호스트 step과 동일 규칙)
-  p.dashCd=Math.max(0,p.dashCd-dt);
-  p.dashTimer=Math.max(0,p.dashTimer-dt);
-  if(p.airDashing&&p.dashTimer<=0)p.airDashing=false;
-  p.stunTimer=Math.max(0,p.stunTimer-dt);
-  if(p.charging){ p.power=Math.min(100,p.power+chargeRate()); }
-  // 이동
-  if(p.stunTimer>0){ p.vx=0; }
-  else if(p.dashTimer>0){ p.vx=p.dashDir*mvSp(p)*2.3; }
-  else {
-    let mv=0;
-    if(NET_HELD.L)mv-=1;
-    if(NET_HELD.R)mv+=1;
-    let sp=mvSp(p);
-    if(p.hasBall)sp*=.88;
-    if(p.charging)sp*=.45;
-    p.vx=mv*sp;
-    if(mv!==0)p.face=mv;
-    p.runPhase+=Math.abs(p.vx)*.045;
-  }
-  // 물리 (호스트 step 미러)
-  if(!p.onGround){
-    if(p.airDashing&&p.dashTimer>0)p.vy=0; else p.vy+=GRAV;
-    p.y+=p.vy;
-    p.squash=Math.max(-.4,-Math.abs(p.vy)*.02);
-    if(p.y>=GROUND-P_H){
-      p.y=GROUND-P_H; p.vy=0; p.onGround=true;
-      p.airUsed=false; p.airDashing=false;
-      if(p.fastFall){ p.fastFall=false; shakeT=Math.max(shakeT,.09); }
-    }
-  } else { p.squash*=.8; }
-  p.x+=p.vx;
-  p.x=Math.max(20+P_W/2,Math.min(W-20-P_W/2,p.x));
-  // 예측 위치 링버퍼 (100ms 전과 권위 비교용)
-  NET.ring.push({x:p.x,y:p.y}); if(NET.ring.length>8)NET.ring.shift();
-}
-function guestReconcile(){
-  const a=NET.authP2;
-  if(!a||!a.fresh)return;
-  a.fresh=false;
-  const past=NET.ring[0]||{x:P2.x,y:P2.y}; // 약 100ms 전 예측치
-  const ex=a.x-past.x, ey=a.y-past.y;
-  const err=Math.hypot(ex,ey);
-  if(err>70){ // 호스트 전용 사건(스틸·앵클·충돌) → 스냅
-    const r=a.raw;
-    netUnpackPlayer(P2,r);
-    P2.dashCd=r[17]; P2.airUsed=!!r[18]; P2.airDashing=!!r[19];
-    NET.ring.length=0;
-  } else if(err>4){ // 미세 드리프트 → 부드럽게 흡수 (정지 중엔 빠르게)
-    const idle=!NET_HELD.L&&!NET_HELD.R&&P2.onGround&&P2.dashTimer<=0;
-    const k=idle?.35:.12;
-    P2.x+=ex*k; P2.y+=ey*k;
-  }
-}
-
-/* --- 게스트: 로컬 키 → 추상 액션 전송 + 로컬 예측 반영 --- */
+/* --- 게스트: 로컬 키 → 롤백 입력 비트 --- */
 const NET_HELD={L:false,R:false,J:false,S:false};
 function netGuestKey(code,v){
   let a=null;
@@ -2149,60 +2050,8 @@ function netGuestKey(code,v){
   else if(code==='ArrowDown'||code==='KeyS')a='S';
   if(!a)return false;
   if(NET_HELD[a]===v)return true;
-  NET_HELD[a]=v;
-  if(NET.dc&&NET.dc.readyState==='open')NET.dc.send(JSON.stringify({t:'k',a,v}));
-  return true; // 로컬 예측은 guestPredict의 프레임 샘플링이 수행
-}
-
-/* --- 스냅샷 직렬화 --- */
-function netPack(){
-  const P=p=>[p.x,p.y,p.vx,p.vy,p.face,p.onGround?1:0,p.hasBall?1:0,p.charging?1:0,p.power,
-              p.dashTimer,p.stunTimer,p.dunking?1:0,p.score,p.onFire?1:0,p.squash,p.runPhase,p.fastFall?1:0,
-              p.dashCd,p.airUsed?1:0,p.airDashing?1:0];
-  return {p1:P(P1),p2:P(P2),
-    b:[ball.x,ball.y,ball.vx,ball.vy,ball.held===P1?1:ball.held===P2?2:0,ball.fire?1:0,ball.spin],
-    g:[timeLeft,freeze,shotLock,suddenDeath?1:0,state==='over'?1:0],
-    ft:freezeText,fs:freezeSub,ov:state==='over'?$('winText').textContent:'',oc:state==='over'?$('winText').style.color:'',
-    of:state==='over'?$('finalScore').textContent:''};
-}
-function netUnpackPlayer(p,a){
-  [p.x,p.y,p.vx,p.vy,p.face]=[a[0],a[1],a[2],a[3],a[4]];
-  p.onGround=!!a[5]; p.hasBall=!!a[6]; p.charging=!!a[7]; p.power=a[8];
-  p.dashTimer=a[9]; p.stunTimer=a[10]; p.dunking=!!a[11]; p.score=a[12];
-  p.onFire=!!a[13]; p.squash=a[14]; p.runPhase=a[15]; p.fastFall=!!a[16];
-}
-function netApplySnap(d,lerpD){
-  const A=NET.snapA, B=d;
-  const mix=(x,y)=>A?x+(y-x)*lerpD:y;
-  netUnpackPlayer(P1,B.p1);
-  if(NET.predict){
-    // P2: 권위 상태는 사본에 저장, 라이브 P2에는 확정 사실만 반영
-    NET.authP2={x:A?mix(A.p2[0],B.p2[0]):B.p2[0], y:A?mix(A.p2[1],B.p2[1]):B.p2[1], raw:B.p2, fresh:true};
-    P2.hasBall=!!B.p2[6]; P2.score=B.p2[12]; P2.onFire=!!B.p2[13];
-    P2.stunTimer=Math.max(P2.stunTimer,B.p2[10]);
-    if(B.p2[11]&&!P2.dunking){ netUnpackPlayer(P2,B.p2); } // 덩크는 호스트 추종
-    else if(!B.p2[11]&&P2.dunking){ P2.dunking=false; }
-  } else {
-    netUnpackPlayer(P2,B.p2);
-    if(A){ P2.x=mix(A.p2[0],B.p2[0]); P2.y=mix(A.p2[1],B.p2[1]); }
-  }
-  if(A){
-    P1.x=mix(A.p1[0],B.p1[0]); P1.y=mix(A.p1[1],B.p1[1]);
-    ball.x=mix(A.b[0],B.b[0]); ball.y=mix(A.b[1],B.b[1]);
-  } else { ball.x=B.b[0]; ball.y=B.b[1]; }
-  ball.vx=B.b[2]; ball.vy=B.b[3];
-  ball.held=B.b[4]===1?P1:B.b[4]===2?P2:null;
-  ball.fire=!!B.b[5]; ball.spin=B.b[6];
-  P1.hasBall=B.b[4]===1; P2.hasBall=B.b[4]===2;
-  timeLeft=B.g[0]; freeze=B.g[1]; shotLock=B.g[2]; suddenDeath=!!B.g[3];
-  freezeText=B.ft||''; freezeSub=B.fs||'';
-  if(B.g[4]&&state!=='over'){
-    state='over'; show('over'); SND.buzzer();
-    $('winText').textContent=B.ov||'경기 종료';
-    if(B.oc)$('winText').style.color=B.oc;
-    $('finalScore').textContent=B.of||`${P1.score} : ${P2.score}`;
-  }
-  else if(!B.g[4]&&state==='over'){ state='playing'; show(null); }
+  NET_HELD[a]=v; // rbLocalBits가 프레임 단위로 소비
+  return true;
 }
 
 function loop(now){
@@ -2237,28 +2086,9 @@ function loop(now){
     requestAnimationFrame(loop);
     return;
   }
-  if(NET.role==='guest'&&NET.playing){
-    acc+=dt;
-    while(acc>=STEP){
-      if(NET.snapB){
-        NET.snapT+=STEP;
-        netApplySnap(NET.snapB, Math.min(1,NET.snapT/33.4)); // P1·공·전역: 권위 보간
-      }
-      if(NET.predict){ guestPredict(STEP/1000); guestReconcile(); }
-      updateFX(STEP/1000);
-      acc-=STEP;
-    }
-    draw();
-    requestAnimationFrame(loop);
-    return;
-  }
   acc+=dt;
   while(acc>=STEP){
     step(STEP/1000);
-    if(NET.role==='host'&&NET.playing&&NET.dc&&NET.dc.readyState==='open'){
-      NET.sendAcc+=STEP;
-      if(NET.sendAcc>=33){ NET.sendAcc=0; NET.dc.send(JSON.stringify({t:'s',d:netPack()})); }
-    }
     acc-=STEP;
   }
   draw();
